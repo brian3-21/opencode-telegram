@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "external_directory": {
+      "*": "ask",
+      "E:\\": "allow",
+      "E:\\**": "allow"
+    },
+    "bash": {
+      "Get-ChildItem*": "allow",
+      "ls*": "allow",
+      "dir*": "allow",
+      "Test-Path*": "allow",
+      "where*": "allow"
+    }
+  }
+}

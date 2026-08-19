@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -75,9 +76,29 @@ def clean_output(text: str) -> str:
     return text.strip()
 
 
+def find_opencode_exe() -> str:
+    if os.name != "nt":
+        return shutil.which("opencode") or "opencode"
+    exe = shutil.which("opencode.exe")
+    if exe:
+        return exe
+    shim = shutil.which("opencode")
+    if shim:
+        npm_dir = Path(shim).resolve().parent / "node_modules"
+        for pkg in ("opencode-ai", "@opencode-ai/opencode"):
+            cand = npm_dir / pkg / "bin" / "opencode.exe"
+            if cand.is_file():
+                return str(cand)
+        return shim
+    return "opencode"
+
+
+OPENCODE_EXE = find_opencode_exe()
+
+
 async def run_opencode(prompt: str, timeout: int = 600) -> str:
     proc = await asyncio.create_subprocess_exec(
-        "opencode",
+        OPENCODE_EXE,
         "run",
         "--title",
         "telegram-bot",
