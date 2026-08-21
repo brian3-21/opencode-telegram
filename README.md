@@ -47,6 +47,7 @@ In Telegram:
 
 - `/start` — verifies the connection and registers your chat as the only authorized one
 - `/ayuda` — shows the available commands
+- `/reset` — full bot restart: clears the owner and all opencode sessions, then relaunches the process
 - Any other message — sent to opencode and the reply is returned
 
 Logs are written to `bot.log` and `bot.err.log`.
@@ -54,8 +55,11 @@ Logs are written to `bot.log` and `bot.err.log`.
 ## How it works
 
 1. The bot listens for messages from the authorized chat (only that `chat_id` gets replies).
-2. The message is passed to `opencode run --title telegram-bot <prompt>`.
-3. The output is cleaned (ANSI codes, whitespace) and split into chunks of 4096 characters to respect Telegram's message limit.
+2. Each chat keeps its own opencode session in `sessions.json`; the first message creates a session and subsequent messages continue it via `opencode run --format json --session <id> --title telegram-bot <prompt>`, so opencode remembers the conversation per chat.
+3. The JSON output is parsed to extract the reply text and the session id.
+4. The output is cleaned and split into chunks of 4096 characters to respect Telegram's message limit.
+
+> Use `/reset` to wipe the conversation memory (and the owner registration) and start fresh. `sessions.json` is git-ignored.
 
 ## Troubleshooting
 

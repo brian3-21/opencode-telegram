@@ -17,7 +17,8 @@ opencode-telegram/
 ├── requirements.txt  # Dependencias de Python
 ├── README.md         # Documentación de instalación y uso
 ├── .env              # No versionado: TELEGRAM_TOKEN y OWNER_CHAT_ID
-├── .gitignore        # Ignora .env, venv/, __pycache__/, *.log
+├── .gitignore        # Ignora .env, venv/, __pycache__/, *.log, sessions.json
+├── sessions.json      # No versionado: mapa chat_id -> session_id de opencode
 ├── venv/             # Entorno virtual local (no versionado)
 ├── bot.log           # Logs de salida (no versionado)
 └── bot.err.log       # Logs de errores (no versionado)
@@ -26,15 +27,19 @@ opencode-telegram/
 ## Cómo funciona (`bot.py`)
 
 1. **Arranque (`main`)**: lee `TELEGRAM_TOKEN` desde `.env`. Si falta, aborta. Registra handlers y hace `run_polling`.
-2. **Autorización**: solo responde al chat cuyo `chat_id` coincide con `OWNER_CHAT_ID` guardado en `.env`. Cualquier otro chat recibe "No autorizado."
+2. **Autorización**: solo responde al chat cuyo `chat_id` coincide con `OWNER_CHAT_ID` guardado en `.env`. Si el dueño no está registrado (valor vacío), cualquier chat recibe "No hay dueno registrado. Envía /start para registrar este chat como dueno." Si hay dueño pero el chat no coincide, recibe "No autorizado. (Tu chat_id es X; el dueno registrado es Y.)" — esto ayuda a diagnosticar cuando se escribe desde un grupo/topic distinto al chat privado donde se registró el dueño. El mensaje se genera en el helper `auth_error(chat_id)`.
 3. **Comandos**:
-   - `/start`: si no hay owner registrado, guarda el `chat_id` actual como único autorizado (`OWNER_CHAT_ID`) usando `python-dotenv`.
+   - `/start`: si no hay owner registrado, guarda el `chat_id` actual como único autorizado (`OWNER_CHAT_ID`) usando `python-dotenv`. Si ya hay dueño y el chat no coincide, devuelve el mensaje de "No autorizado" con los chat_id (ver autorización).
    - `/ayuda`: lista comandos disponibles.
+   - `/reset`: reinicio total del bot. Borra `OWNER_CHAT_ID` de `.env`, vacía `sessions.json` y relanza el proceso con `os.execv`. Solo lo puede usar el dueño.
 4. **Mensajes normales (`handle_message`)**: manda un "Pensando...", llama a opencode, borra el "Pensando..." y responde con la salida.
-5. **Ejecución de opencode (`run_opencode`)**: lanza `opencode run --title telegram-bot <prompt>` como subproceso async (`asyncio.create_subprocess_exec`), con timeout de 600s. Si no hay stdout usa stderr.
+5. **Ejecución de opencode (`run_opencode`)**: lanza `opencode run --format json --title telegram-bot <prompt>` como subproceso async (`asyncio.create_subprocess_exec`), con timeout de 600s. Si se le pasa un `session_id`, añade `--session <id>` para continuar la conversación; si no, crea una sesión nueva. Devuelve `(reply, session_id)`. Si el parseo JSON no produce texto, hace fallback al stderr limpio.
 6. **Resolución del ejecutable (`find_opencode_exe`)**: en Windows npm instala opencode como shim `.cmd` no ejecutable directo; el bot busca el `.exe` real en `%APPDATA%\npm\node_modules/opencode-ai/bin/opencode.exe`. En otros SO usa `shutil.which("opencode")`.
-7. **Limpieza (`clean_output`)**: quita códigos ANSI y colapsa espacios/tabs.
-8. **Particionado (`split_long`)**: divide la respuesta en chunks de 4096 chars cortando por saltos de línea.
+7. **Parseo JSON (`parse_opencode_output`)**: recorre las líneas JSON (ndjson); extrae `sessionID` y el texto de los eventos `type:"text"` (`part.text`). Une el texto y devuelve `(session_id, reply)`.
+8. **Limpieza (`clean_output`)**: quita códigos ANSI y colapsa espacios/tabs. (Fallback si el JSON no trae texto.)
+9. **Particionado (`split_long`)**: divide la respuesta en chunks de 4096 chars cortando por saltos de línea.
+10. **Sesiones por chat**: `sessions.json` mapea `chat_id -> session_id` (`load_sessions`/`save_sessions`/`get_session_id`/`set_session_id`/`clear_sessions`). `handle_message` recupera el session del chat, lo pasa a `run_opencode` y guarda el nuevo.
+11. **Reinicio (`cmd_reset`)**: solo dueño (si el chat no es dueño, devuelve el mensaje de "No autorizado" con los chat_id); borra `OWNER_CHAT_ID` y vacía `sessions.json`, avisa y relanza el proceso con `os.execv`.
 
 ## Configuración de permisos (`opencode.json`)
 
@@ -77,6 +82,6 @@ python -u bot.py
 
 ## Convenciones para contribuir
 
-- No commitear `.env`, `venv/`, `__pycache__/`, `*.log` (ya en `.gitignore`).
+- No commitear `.env`, `venv/`, `__pycache__/`, `*.log`, `sessions.json` (ya en `.gitignore`).
 - El bot solo debe ejecutarse en la máquina del propietario.
 - Mantener el límite de 4096 caracteres por mensaje de Telegram.
