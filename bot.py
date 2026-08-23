@@ -1,11 +1,15 @@
 import asyncio
 import ctypes
 import json
+import atexit
 import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 from dotenv import dotenv_values, set_key
@@ -22,7 +26,10 @@ BASE_DIR = Path(__file__).resolve().parent
 ENV_FILE = BASE_DIR / ".env"
 SESSIONS_FILE = BASE_DIR / "sessions.json"
 LOCK_FILE = BASE_DIR / ".bot.lock"
+PID_FILE = BASE_DIR / ".bot.pid"
 MAX_MESSAGE_LEN = 4096
+STARTED_AT = 0.0
+RUN_COMMIT = "unknown"
 _LOCK_HANDLE = None
 
 logging.basicConfig(
@@ -123,6 +130,7 @@ async def cmd_ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "/start - Verificar conexion\n"
         "/ayuda - Mostrar esta ayuda\n"
+        "/state - Estado del bot: PID, ultimo commit, inicio y tiempo activo (segundos)\n"
         "/reset - Reinicio total del bot (borra dueno y sesiones)\n"
         "Cualquier otro mensaje se envia a opencode (opencode run)."
     )
@@ -291,6 +299,7 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clear_sessions()
     await update.message.reply_text("Configuracion borrada. Reiniciando el bot...")
     await context.application.stop()
+    remove_pid_file()
     os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:])
 
 
@@ -329,17 +338,88 @@ def acquire_single_instance() -> None:
         sys.exit("Ya hay una instancia del bot corriendo. Saliendo.")
 
 
+def get_repo_commit() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
+
+
+def write_pid_file() -> None:
+    try:
+        content = (
+            str(os.getpid())
+            + "\n"
+            + "commit="
+            + RUN_COMMIT
+            + "\n"
+            + "started="
+            + time.strftime("%Y-%m-%d %H:%M:%S")
+            + "\n"
+        )
+        PID_FILE.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        log.warning("No se pudo escribir el archivo PID %s: %s", PID_FILE, exc)
+
+
+def remove_pid_file() -> None:
+    try:
+        if PID_FILE.is_file():
+            PID_FILE.unlink()
+    except OSError as exc:
+        log.warning("No se pudo borrar el archivo PID %s: %s", PID_FILE, exc)
+
+
+async def cmd_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_owner(update.effective_chat.id):
+        await update.message.reply_text(auth_error(update.effective_chat.id))
+        return
+    elapsed = int(time.time() - STARTED_AT)
+    await update.message.reply_text(
+        "📊 Bot state\n"
+        "PID: " + str(os.getpid()) + "\n"
+        "Last commit: " + RUN_COMMIT + "\n"
+        "Started: " + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(STARTED_AT)) + "\n"
+        "Uptime: " + str(elapsed) + "s"
+    )
+
+
+def start_heartbeat() -> None:
+    def _loop() -> None:
+        while True:
+            time.sleep(300)
+            log.info("Bot vivo - %s", time.strftime("%H:%M"))
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
 def main() -> None:
+    global STARTED_AT, RUN_COMMIT
     acquire_single_instance()
+    STARTED_AT = time.time()
+    RUN_COMMIT = get_repo_commit()
+    write_pid_file()
+    atexit.register(remove_pid_file)
     token = resolve_env().get("TELEGRAM_TOKEN", "").strip()
     if not token:
         sys.exit("Falta TELEGRAM_TOKEN en .env")
     application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("ayuda", cmd_ayuda))
+    application.add_handler(CommandHandler("state", cmd_state))
     application.add_handler(CommandHandler("reset", cmd_reset))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
+    start_heartbeat()
     log.info("Bot iniciado. Esperando mensajes...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
