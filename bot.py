@@ -1,5 +1,7 @@
 import asyncio
+import ctypes
 import json
+import logging
 import os
 import re
 import shutil
@@ -19,7 +21,19 @@ from telegram.ext import (
 BASE_DIR = Path(__file__).resolve().parent
 ENV_FILE = BASE_DIR / ".env"
 SESSIONS_FILE = BASE_DIR / "sessions.json"
+LOCK_FILE = BASE_DIR / ".bot.lock"
 MAX_MESSAGE_LEN = 4096
+_LOCK_HANDLE = None
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(BASE_DIR / "bot.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+log = logging.getLogger("opencode-telegram")
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 WHITESPACE_RE = re.compile(r"[ \t]+")
@@ -167,18 +181,26 @@ async def run_opencode(prompt: str, session_id: str = "", timeout: int = 600) ->
     if session_id:
         args += ["--session", session_id]
     args.append(prompt)
+    log.info("Ejecutando opencode (session=%s): %s", session_id or "<nueva>", prompt[:80])
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=str(BASE_DIR),
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        log.error("opencode excedio el timeout de %ss", timeout)
+        raise
     out = stdout.decode("utf-8", errors="replace")
     err = stderr.decode("utf-8", errors="replace")
     session_id_out, reply = parse_opencode_output(out)
     if not reply.strip():
         reply = clean_output(err) or "Sin respuesta."
+    log.info("opencode termino (session=%s, reply_len=%d)", session_id_out or "<nueva>", len(reply))
     return reply, session_id_out
 
 
@@ -208,20 +230,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not prompt:
         return
 
+    loop = asyncio.get_event_loop()
+    start = loop.time()
     waiting = await update.message.reply_text("Pensando...")
+    log.info("Mensaje recibido de %s: %s", chat_id, prompt[:80])
+
+    async def update_status() -> None:
+        try:
+            while True:
+                await asyncio.sleep(15)
+                elapsed = int(loop.time() - start)
+                try:
+                    await waiting.edit_text("Pensando... (" + str(elapsed) + "s)")
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass
+
+    status_task = asyncio.create_task(update_status())
     sid = get_session_id(chat_id)
+    reply = "Sin respuesta."
     try:
         reply, new_sid = await run_opencode(prompt, sid)
         if new_sid:
             set_session_id(chat_id, new_sid)
     except asyncio.TimeoutError:
-        reply = "La consulta tardo demasiado y fue cancelada."
+        reply = "La consulta tardo demasiado (>600s) y fue cancelada."
+        log.error("Timeout atendiendo mensaje de %s", chat_id)
     except Exception as exc:
         reply = "Error ejecutando opencode: " + str(exc)
+        log.exception("Error atendiendo mensaje de %s: %s", chat_id, exc)
 
-    await waiting.delete()
+    status_task.cancel()
+    try:
+        await waiting.delete()
+    except Exception:
+        pass
     for chunk in split_long(reply):
         await update.message.reply_text(chunk)
+    log.info("Respuesta enviada a %s (len=%d)", chat_id, len(reply))
+
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.exception("Error no capturado en el bot: %s", context.error)
+    try:
+        if update and update.effective_chat:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Error interno del bot: " + str(context.error),
+            )
+    except Exception:
+        pass
 
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -235,7 +294,43 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:])
 
 
+def acquire_single_instance() -> None:
+    """Allow only one bot process at a time.
+
+    On Windows a named mutex is used (the canonical single-instance mechanism):
+    it is system-wide, exclusive across processes, and released automatically
+    when the process exits (even on crash). On other systems a file lock is
+    used as a fallback. Exits if another instance is already running.
+    """
+    global _LOCK_HANDLE
+    if sys.platform == "win32":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        ERROR_ALREADY_EXISTS = 183
+        mutex = kernel32.CreateMutexW(None, 1, "Global\\OpenBotTelegramInstance")
+        if not mutex:
+            sys.exit("No se pudo crear el mutex de instancia.")
+        if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+            log.error("Ya hay otra instancia del bot corriendo. Este proceso se detiene.")
+            sys.exit("Ya hay una instancia del bot corriendo. Saliendo.")
+        _LOCK_HANDLE = mutex
+        return
+
+    try:
+        _LOCK_HANDLE = open(LOCK_FILE, "a+")
+    except OSError as exc:
+        sys.exit("No se pudo crear el archivo de bloqueo (.bot.lock): " + str(exc))
+    try:
+        import fcntl
+        fcntl.flock(_LOCK_HANDLE.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (ImportError, OSError):
+        log.error("Ya hay otra instancia del bot corriendo. Este proceso se detiene.")
+        sys.exit("Ya hay una instancia del bot corriendo. Saliendo.")
+
+
 def main() -> None:
+    acquire_single_instance()
     token = resolve_env().get("TELEGRAM_TOKEN", "").strip()
     if not token:
         sys.exit("Falta TELEGRAM_TOKEN en .env")
@@ -244,7 +339,8 @@ def main() -> None:
     application.add_handler(CommandHandler("ayuda", cmd_ayuda))
     application.add_handler(CommandHandler("reset", cmd_reset))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Bot iniciado. Esperando mensajes...")
+    application.add_error_handler(error_handler)
+    log.info("Bot iniciado. Esperando mensajes...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

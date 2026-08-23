@@ -6,3 +6,4 @@ venv/
 sessions.json
 .agents/
 skills-lock.json
+.bot.lock
