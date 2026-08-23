@@ -89,3 +89,4 @@ python -u bot.py
 - No commitear `.env`, `venv/`, `__pycache__/`, `*.log`, `sessions.json` (ya en `.gitignore`).
 - El bot solo debe ejecutarse en la máquina del propietario.
 - Mantener el límite de 4096 caracteres por mensaje de Telegram.
+- **Los mensajes de commit deben estar en inglés** (todos, sin excepción).
