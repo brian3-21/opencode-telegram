@@ -117,21 +117,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if is_owner(chat_id):
         await update.message.reply_text(
-            "Hola de nuevo. Envia cualquier mensaje para consultar a opencode,\no /ayuda para ver los comandos."
+            "Hola de nuevo. Envia cualquier mensaje para consultar a opencode,\no /help para ver los comandos."
         )
     else:
         await update.message.reply_text(auth_error(chat_id))
 
 
-async def cmd_ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(update.effective_chat.id):
         await update.message.reply_text(auth_error(update.effective_chat.id))
         return
     await update.message.reply_text(
         "/start - Verificar conexion\n"
-        "/ayuda - Mostrar esta ayuda\n"
+        "/help - Mostrar esta ayuda\n"
         "/state - Estado del bot: PID, ultimo commit, inicio y tiempo activo (segundos)\n"
-        "/reset - Reinicio total del bot (borra dueno y sesiones)\n"
+        "/stop - Detener el bot\n"
         "Cualquier otro mensaje se envia a opencode (opencode run)."
     )
 
@@ -291,16 +291,12 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         pass
 
 
-async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(update.effective_chat.id):
         await update.message.reply_text(auth_error(update.effective_chat.id))
         return
-    save_owner_chat_id("")
-    clear_sessions()
-    await update.message.reply_text("Configuracion borrada. Reiniciando el bot...")
+    await update.message.reply_text("Deteniendo el bot...")
     await context.application.stop()
-    remove_pid_file()
-    os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:])
 
 
 def acquire_single_instance() -> None:
@@ -414,9 +410,9 @@ def main() -> None:
         sys.exit("Falta TELEGRAM_TOKEN en .env")
     application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("ayuda", cmd_ayuda))
+    application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("state", cmd_state))
-    application.add_handler(CommandHandler("reset", cmd_reset))
+    application.add_handler(CommandHandler("stop", cmd_stop))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
     start_heartbeat()
