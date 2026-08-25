@@ -45,11 +45,11 @@ python -u bot.py
 
 In Telegram:
 
-- `/start` — verifies the connection and registers your chat as the only authorized one
-- `/ayuda` — shows the available commands
-- `/state` — full status: PID, the last git commit the running instance was launched from, start time and uptime in seconds
-- `/reset` — full bot restart: clears the owner and all opencode sessions, then relaunches the process
-- Any other message — sent to opencode and the reply is returned
+  - `/start` — verifies the connection and registers your chat as the only authorized one
+  - `/help` — shows the available commands
+  - `/state` — full status: PID, the last git commit the running instance was launched from, start time and uptime in seconds
+  - `/stop` — stops the bot
+  - Any other message — sent to opencode and the reply is returned
 
 Logs are written to `bot.log` and `bot.err.log`.
 
@@ -57,14 +57,14 @@ Logs are written to `bot.log` and `bot.err.log`.
 
 Because `run_polling` prints nothing while idle and the process is often launched detached, use these signals to confirm the bot is running:
 
-- **`.bot.pid`** — a file written at startup containing the bot's process ID (first line), plus the git commit it was launched from (`commit=...`) and the start time (`started=...`). Verify the process is alive with `Get-Process -Id (Get-Content .bot.pid)` (PowerShell) or `ps -p $(cat .bot.pid)` (Linux/macOS). It is removed automatically on normal exit and on `/reset` (it is git-ignored).
+- **`.bot.pid`** — a file written at startup containing the bot's process ID (first line), plus the git commit it was launched from (`commit=...`) and the start time (`started=...`). Verify the process is alive with `Get-Process -Id (Get-Content .bot.pid)` (PowerShell) or `ps -p $(cat .bot.pid)` (Linux/macOS). It is removed automatically on normal exit (it is git-ignored).
 - **`/state`** — sends the full status: PID, the last commit the running instance came from, start time and uptime in seconds. Use this to detect a **stale instance** (see below).
 
 ### What is a PID and how the status logic works
 
 A **PID (Process ID)** is a number the operating system assigns to every running process so it can identify and manage it (send signals, inspect, or terminate it). At any moment, two running processes never share the same PID.
 
-`OpenBot` writes **its own PID** into `.bot.pid` at startup — and only after it has won the single-instance lock, so the number always belongs to the real running bot. When the bot exits (normally or via `/reset`), it deletes the file.
+`OpenBot` writes **its own PID** into `.bot.pid` at startup — and only after it has won the single-instance lock, so the number always belongs to the real running bot. When the bot exits normally, it deletes the file.
 
 To know if the bot is truly alive you do **not** trust the file's presence alone: you read the PID and ask the OS whether a process with that number exists:
 
@@ -79,7 +79,7 @@ If the process exists → the bot is running. If it does not → the file is sta
 - **Logs** — `bot.log` records every message, opencode run, and the periodic heartbeat.
 - **Single-instance mutex test** — only one instance may run at a time (a named mutex `Global\OpenBotTelegramInstance` on Windows, or a file lock on `.bot.lock` elsewhere). Launching a second copy immediately exits with `Ya hay una instancia del bot corriendo`. This proves the running process is the unique one.
 
-> **Catching a stale instance:** because `.bot.pid` records the commit the bot launched from, you can tell if a long-running instance is behind the code on disk (e.g. you edited `bot.py` or pulled new commits but never restarted). Compare the `commit=` line with `git rev-parse --short HEAD`, or just run `bot_status.ps1`. If they differ, restart the bot (`/reset` or Ctrl+C + relaunch) so the new code takes effect.
+> **Catching a stale instance:** because `.bot.pid` records the commit the bot launched from, you can tell if a long-running instance is behind the code on disk (e.g. you edited `bot.py` or pulled new commits but never restarted). Compare the `commit=` line with `git rev-parse --short HEAD`, or just run `bot_status.ps1`. If they differ, stop the bot (with `/stop` or Ctrl+C) and relaunch `python -u bot.py` so the new code takes effect.
 
 ## How it works
 
@@ -88,7 +88,7 @@ If the process exists → the bot is running. If it does not → the file is sta
 3. The JSON output is parsed to extract the reply text and the session id.
 4. The output is cleaned and split into chunks of 4096 characters to respect Telegram's message limit.
 
-> Use `/reset` to wipe the conversation memory (and the owner registration) and start fresh. `sessions.json` is git-ignored.
+> There is currently no command to wipe the conversation memory. To start fresh, stop the bot (`/stop` or Ctrl+C) and delete `sessions.json` manually; to require re-registration, also remove `OWNER_CHAT_ID` from `.env`. `sessions.json` is git-ignored.
 
 ## Troubleshooting
 
