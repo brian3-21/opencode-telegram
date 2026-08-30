@@ -76,6 +76,9 @@ def auth_error(chat_id: int) -> str:
     )
 
 
+DEFAULT_SECTION = "default"
+
+
 def load_sessions() -> dict:
     if SESSIONS_FILE.is_file():
         try:
@@ -89,19 +92,81 @@ def save_sessions(data: dict) -> None:
     SESSIONS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def get_session_id(chat_id: int) -> str:
-    return load_sessions().get(str(chat_id), "")
-
-
-def set_session_id(chat_id: int, session_id: str) -> None:
-    data = load_sessions()
-    data[str(chat_id)] = session_id
-    save_sessions(data)
-
-
 def clear_sessions() -> None:
     if SESSIONS_FILE.is_file():
         SESSIONS_FILE.unlink()
+
+
+def _migrate_chat(value: object) -> dict:
+    """Old format stored chat_id -> session_id (string). New format stores a
+    dict with the current section and a map of section name -> session id."""
+    if isinstance(value, dict) and "sections" in value:
+        if "current" not in value or value.get("current") not in value.get("sections", {}):
+            value["current"] = next(iter(value.get("sections", {})), DEFAULT_SECTION)
+        return value
+    session_id = value if isinstance(value, str) else ""
+    return {"current": DEFAULT_SECTION, "sections": {DEFAULT_SECTION: session_id}}
+
+
+def get_chat_sessions(chat_id: int) -> dict:
+    data = load_sessions()
+    value = data.get(str(chat_id))
+    if value is None:
+        return {"current": DEFAULT_SECTION, "sections": {DEFAULT_SECTION: ""}}
+    return _migrate_chat(value)
+
+
+def save_chat_sessions(chat_id: int, chat_data: dict) -> None:
+    data = load_sessions()
+    data[str(chat_id)] = chat_data
+    save_sessions(data)
+
+
+def get_current_section(chat_id: int) -> str:
+    return get_chat_sessions(chat_id).get("current") or DEFAULT_SECTION
+
+
+def get_section_session(chat_id: int, name: str) -> str:
+    return get_chat_sessions(chat_id).get("sections", {}).get(name, "")
+
+
+def set_section_session(chat_id: int, name: str, session_id: str) -> None:
+    chat_data = get_chat_sessions(chat_id)
+    chat_data["sections"][name] = session_id
+    chat_data["current"] = name
+    save_chat_sessions(chat_id, chat_data)
+
+
+def create_section(chat_id: int, name: str) -> None:
+    chat_data = get_chat_sessions(chat_id)
+    if name not in chat_data["sections"]:
+        chat_data["sections"][name] = ""
+    chat_data["current"] = name
+    save_chat_sessions(chat_id, chat_data)
+
+
+def switch_section(chat_id: int, name: str) -> bool:
+    chat_data = get_chat_sessions(chat_id)
+    if name in chat_data["sections"]:
+        chat_data["current"] = name
+        save_chat_sessions(chat_id, chat_data)
+        return True
+    return False
+
+
+def delete_section(chat_id: int, name: str) -> bool:
+    chat_data = get_chat_sessions(chat_id)
+    if name not in chat_data["sections"] or name == DEFAULT_SECTION and len(chat_data["sections"]) <= 1:
+        return False
+    del chat_data["sections"][name]
+    if chat_data["current"] == name:
+        chat_data["current"] = next(iter(chat_data["sections"]), DEFAULT_SECTION)
+    save_chat_sessions(chat_id, chat_data)
+    return True
+
+
+def list_sections(chat_id: int) -> list[str]:
+    return list(get_chat_sessions(chat_id).get("sections", {}).keys())
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -132,7 +197,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/help - Mostrar esta ayuda\n"
         "/state - Estado del bot: PID, ultimo commit, inicio y tiempo activo (segundos)\n"
         "/stop - Detener el bot\n"
-        "Cualquier otro mensaje se envia a opencode (opencode run)."
+        "/sections - Listar tus secciones (contextos) y ver la activa\n"
+        "/new <nombre> - Crear una seccion nueva y activarla (sin nombre crea una auto)\n"
+        "/use <nombre> - Cambiar a una seccion existente\n"
+        "/delete <nombre> - Borrar una seccion\n"
+        "Cualquier otro mensaje se envia a opencode dentro de la seccion activa."
     )
 
 
@@ -184,8 +253,8 @@ def parse_opencode_output(text: str) -> tuple[str, str]:
     return session_id, "\n".join(chunks).strip()
 
 
-async def run_opencode(prompt: str, session_id: str = "", timeout: int = 600) -> tuple[str, str]:
-    args = [OPENCODE_EXE, "run", "--format", "json", "--title", "telegram-bot"]
+async def run_opencode(prompt: str, session_id: str = "", timeout: int = 600, title: str = "telegram-bot") -> tuple[str, str]:
+    args = [OPENCODE_EXE, "run", "--format", "json", "--title", title]
     if session_id:
         args += ["--session", session_id]
     args.append(prompt)
@@ -256,12 +325,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             pass
 
     status_task = asyncio.create_task(update_status())
-    sid = get_session_id(chat_id)
+    section = get_current_section(chat_id)
+    sid = get_section_session(chat_id, section)
     reply = "Sin respuesta."
     try:
-        reply, new_sid = await run_opencode(prompt, sid)
+        reply, new_sid = await run_opencode(prompt, sid, title=section)
         if new_sid:
-            set_session_id(chat_id, new_sid)
+            set_section_session(chat_id, section, new_sid)
     except asyncio.TimeoutError:
         reply = "La consulta tardo demasiado (>600s) y fue cancelada."
         log.error("Timeout atendiendo mensaje de %s", chat_id)
@@ -297,6 +367,74 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text("Deteniendo el bot...")
     await context.application.stop()
+
+
+async def cmd_sections(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    if not is_owner(chat_id):
+        await update.message.reply_text(auth_error(chat_id))
+        return
+    chat_data = get_chat_sessions(chat_id)
+    current = chat_data.get("current") or DEFAULT_SECTION
+    lines = ["📚 Secciones (contextos):"]
+    for name in chat_data.get("sections", {}):
+        marker = "➡️ " if name == current else "   "
+        active = " (activa)" if name == current else ""
+        lines.append(marker + name + active)
+    lines.append("")
+    lines.append("Usa /new <nombre> para crear una seccion, /use <nombre> para cambiar, /delete <nombre> para borrar.")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    if not is_owner(chat_id):
+        await update.message.reply_text(auth_error(chat_id))
+        return
+    if context.args:
+        name = " ".join(context.args).strip()
+    else:
+        name = DEFAULT_SECTION + "-" + str(len(get_chat_sessions(chat_id).get("sections", {})) + 1)
+    if not name:
+        await update.message.reply_text("Nombre de seccion invalido.")
+        return
+    create_section(chat_id, name)
+    await update.message.reply_text(
+        "Seccion '" + name + "' creada y activada. El primer mensaje que envies iniciara su contexto en opencode."
+    )
+
+
+async def cmd_use(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    if not is_owner(chat_id):
+        await update.message.reply_text(auth_error(chat_id))
+        return
+    if not context.args:
+        await update.message.reply_text("Uso: /use <nombre>. Usa /sections para ver las disponibles.")
+        return
+    name = " ".join(context.args).strip()
+    if switch_section(chat_id, name):
+        await update.message.reply_text("Ahora estas en la seccion '" + name + "'.")
+    else:
+        await update.message.reply_text("No existe la seccion '" + name + "'.")
+
+
+async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    if not is_owner(chat_id):
+        await update.message.reply_text(auth_error(chat_id))
+        return
+    if not context.args:
+        await update.message.reply_text("Uso: /delete <nombre>. Usa /sections para ver las disponibles.")
+        return
+    name = " ".join(context.args).strip()
+    if name == DEFAULT_SECTION:
+        await update.message.reply_text("No puedes borrar la seccion '" + DEFAULT_SECTION + "'.")
+        return
+    if delete_section(chat_id, name):
+        await update.message.reply_text("Seccion '" + name + "' borrada.")
+    else:
+        await update.message.reply_text("No existe la seccion '" + name + "'.")
 
 
 def acquire_single_instance() -> None:
@@ -413,6 +551,10 @@ def main() -> None:
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("state", cmd_state))
     application.add_handler(CommandHandler("stop", cmd_stop))
+    application.add_handler(CommandHandler("sections", cmd_sections))
+    application.add_handler(CommandHandler("new", cmd_new))
+    application.add_handler(CommandHandler("use", cmd_use))
+    application.add_handler(CommandHandler("delete", cmd_delete))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
     start_heartbeat()

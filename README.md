@@ -45,11 +45,15 @@ python -u bot.py
 
 In Telegram:
 
-  - `/start` — verifies the connection and registers your chat as the only authorized one
-  - `/help` — shows the available commands
-  - `/state` — full status: PID, the last git commit the running instance was launched from, start time and uptime in seconds
-  - `/stop` — stops the bot
-  - Any other message — sent to opencode and the reply is returned
+   - `/start` — verifies the connection and registers your chat as the only authorized one
+   - `/help` — shows the available commands
+   - `/state` — full status: PID, the last git commit the running instance was launched from, start time and uptime in seconds
+   - `/stop` — stops the bot
+   - `/sections` — lists your sections (contexts) and shows which one is active
+   - `/new <name>` — creates a new section and makes it active (omit the name to auto-generate one)
+   - `/use <name>` — switches to an existing section
+   - `/delete <name>` — deletes a section
+   - Any other message — sent to opencode within the currently active section
 
 Logs are written to `bot.log` and `bot.err.log`.
 
@@ -84,11 +88,11 @@ If the process exists → the bot is running. If it does not → the file is sta
 ## How it works
 
 1. The bot listens for messages from the authorized chat (only that `chat_id` gets replies).
-2. Each chat keeps its own opencode session in `sessions.json`; the first message creates a session and subsequent messages continue it via `opencode run --format json --session <id> --title telegram-bot <prompt>`, so opencode remembers the conversation per chat.
+2. Each chat keeps its own opencode sessions organized into **sections** in `sessions.json`. A section is an isolated opencode conversation: the first message in a section creates its session and subsequent messages continue it via `opencode run --format json --session <id> --title <section> <prompt>`, so opencode remembers the conversation per section. Use `/sections`, `/new`, `/use` and `/delete` to manage them. The default section is always `default`; switching sections changes which conversation your next messages feed into.
 3. The JSON output is parsed to extract the reply text and the session id.
 4. The output is cleaned and split into chunks of 4096 characters to respect Telegram's message limit.
 
-> There is currently no command to wipe the conversation memory. To start fresh, stop the bot (`/stop` or Ctrl+C) and delete `sessions.json` manually; to require re-registration, also remove `OWNER_CHAT_ID` from `.env`. `sessions.json` is git-ignored.
+> The old flat format (`chat_id -> session_id`) is migrated automatically to the sectioned format on first read (the existing session becomes the `default` section). To wipe all conversation memory, stop the bot (`/stop` or Ctrl+C) and delete `sessions.json` manually; to require re-registration, also remove `OWNER_CHAT_ID` from `.env`. `sessions.json` is git-ignored.
 
 ## Troubleshooting
 

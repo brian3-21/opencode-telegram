@@ -41,7 +41,14 @@ opencode-telegram/
 8. **Limpieza (`clean_output`)**: quita códigos ANSI y colapsa espacios/tabs. (Fallback si el JSON no trae texto.)
 9. **Particionado (`split_long`)**: divide la respuesta en chunks de 4096 chars cortando por saltos de línea.
 10. **Sesiones por chat**: `sessions.json` mapea `chat_id -> session_id` (`load_sessions`/`save_sessions`/`get_session_id`/`set_session_id`/`clear_sessions`). `handle_message` recupera el session del chat, lo pasa a `run_opencode` y guarda el nuevo.
-11. **Parada (`cmd_stop`)**: solo dueño (si el chat no es dueño, devuelve el mensaje de "No autorizado" con los chat_id); detiene el bot llamando a `application.stop()` (detiene el polling y termina el proceso). No relanza ni limpia sesiones.
+11. **Sistema de secciones/contextos**: A partir de esta versión, el bot organiza las sesiones de opencode en secciones (contextos) para mantener conversaciones separadas. Cada chat puede tener múltiples secciones, cada una con su propia conversación continua con opencode.
+    - El comando `/sections` lista las secciones disponibles y muestra cuál está activa.
+    - El comando `/new <nombre>` crea una nueva sección y la activa. Si no se proporciona nombre, se genera automáticamente.
+    - El comando `/use <nombre>` cambia la sección activa.
+    - El comando `/delete <nombre>` elimina una sección (no se puede borrar la sección "default" si es la única).
+    - Los mensajes normales se envían a opencode dentro de la sección activa, y la respuesta continúa esa conversación específica.
+    - El formato de `sessions.json` se migró de `chat_id -> session_id` a un formato con secciones: `{ "current": "nombre_seccion", "sections": { "nombre_seccion": "session_id" } }`. La migración es automática al leer un archivo con el formato antiguo.
+12. **Parada (`cmd_stop`)**: solo dueño (si el chat no es dueño, devuelve el mensaje de "No autorizado" con los chat_id); detiene el bot llamando a `application.stop()` (detiene el polling y termina el proceso). No relanza ni limpia sesiones.
 
 ## Configuración de permisos (`opencode.json`)
 
