@@ -10,12 +10,31 @@ A Telegram bot that bridges your messages to [opencode](https://opencode.ai). Ev
 
 ## Installation
 
+### Windows (PowerShell)
+
 ```powershell
 git clone <repo-url>
 cd opencode-telegram
 python -m venv venv
 .\venv\Scripts\activate
 pip install -r requirements.txt
+```
+
+### NixOS (flakes) — Run
+
+```bash
+nix run github:brian3-21/opencode-telegram
+```
+
+`opencode` and `git` are the only dependencies not handled by Nix — install them separately and keep them on your `PATH`. `git` is optional: without it, `/state` and `.bot.pid` just report `unknown` for the commit. The built binary reads `.env` from and writes all runtime state (`sessions.json`, `bot.log`, `.bot.pid`, `.bot.lock`) to `~/.config/opencode-telegram/`.
+
+#### NixOS (flakes) — Development
+
+```bash
+git clone https://github.com/brian3-21/opencode-telegram
+cd opencode-telegram
+nix develop          # dev shell with python + deps + git
+python bot.py        # run from the source tree; state lives in this folder
 ```
 
 ## Configuration
@@ -99,3 +118,4 @@ If the process exists → the bot is running. If it does not → the file is sta
 - **`[WinError 2]` when sending a message**: on Windows, npm installs opencode as a `.cmd` shim that cannot be executed directly. The bot resolves it automatically by looking for the real exe at `%APPDATA%\npm\node_modules\opencode-ai\bin\opencode.exe`, but you must restart the bot after updating.
 - **Rejected permissions (`permission requested... auto-rejecting`)**: the process is non-interactive; add the matching rule to `opencode.json` (see the Permissions section).
 - **`Ya hay una instancia del bot corriendo` on Linux/macOS** (the `.bot.lock` trap): on non-Windows systems the single-instance lock is a file lock on `.bot.lock` instead of a system mutex. If the bot crashes hard (kill -9, power loss) the lock may not be released and the file can be left behind, so the next launch wrongly thinks another instance is running and exits. Fix: delete `.bot.lock` manually and relaunch. On Windows this does not happen, because the mutex is released automatically by the OS when the process ends. (This note is for future use if you run the bot on a Linux/macOS machine; on Windows it is irrelevant.)
+
