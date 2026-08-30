@@ -22,7 +22,7 @@ from telegram.ext import (
     filters,
 )
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(os.environ.get("OPENBOT_DIR") or Path(__file__).resolve().parent)
 ENV_FILE = BASE_DIR / ".env"
 SESSIONS_FILE = BASE_DIR / "sessions.json"
 LOCK_FILE = BASE_DIR / ".bot.lock"
