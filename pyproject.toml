@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opencode-telegram"
+version = "0.1.0"
+description = "Telegram bot connected to opencode"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "python-telegram-bot>=22.0",
+  "python-dotenv>=1.0",
+]
+
+[project.scripts]
+opencode-telegram = "bot:main"
+
+[tool.setuptools]
+py-modules = ["bot"]
