@@ -488,6 +488,22 @@ def get_repo_commit() -> str:
     return "unknown"
 
 
+def get_commit_title() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--pretty=format:%s"],
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
+
+
 def write_pid_file() -> None:
     try:
         content = (
@@ -518,10 +534,13 @@ async def cmd_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(auth_error(update.effective_chat.id))
         return
     elapsed = int(time.time() - STARTED_AT)
+    commit_hash = get_repo_commit()
+    commit_title = get_commit_title()
+    commit_info = f"{commit_title} ({commit_hash})"
     await update.message.reply_text(
         "📊 Bot state\n"
         "PID: " + str(os.getpid()) + "\n"
-        "Last commit: " + RUN_COMMIT + "\n"
+        "Last commit: " + commit_info + "\n"
         "Started: " + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(STARTED_AT)) + "\n"
         "Uptime: " + str(elapsed) + "s"
     )
