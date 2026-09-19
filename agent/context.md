@@ -17,7 +17,8 @@ opencode-telegram/
 ├── requirements.txt  # Dependencias de Python
 ├── README.md         # Documentación de instalación y uso
 ├── .env              # No versionado: TELEGRAM_TOKEN y OWNER_CHAT_ID
-├── .gitignore        # Ignora .env, venv/, __pycache__/, *.log, sessions.json
+├── config.json       # No versionado: work_dir (directorio donde arranca opencode)
+├── .gitignore        # Ignora .env, config.json, venv/, __pycache__/, *.log, sessions.json
 ├── sessions.json      # No versionado: mapa chat_id -> session_id de opencode
 ├── venv/             # Entorno virtual local (no versionado)
 ├── bot.log           # Logs de salida (no versionado)
@@ -35,7 +36,7 @@ opencode-telegram/
    - `/stop`: detiene el bot (detiene el polling y termina el proceso). Solo lo puede usar el dueño.
 4. **Mensajes normales (`handle_message`)**: manda un "Pensando...", llama a opencode, borra el "Pensando..." y responde con la salida.
 5. **Indicadores de estado**: al arrancar (tras `acquire_single_instance`) captura `STARTED_AT` y `RUN_COMMIT` (commit de git vía `get_repo_commit()`, con fallback `"unknown"`) y escribe `.bot.pid` con 3 líneas: `<pid>`, `commit=<hash>`, `started=<fecha>`; registra `atexit` para borrarlo al salir normalmente (no hay un comando de reinicio que lo borre antes, dado que `/reset` fue eliminado). Un hilo en segundo plano (`start_heartbeat`, daemon) registra cada 5 min `Bot vivo - HH:MM` en consola y `bot.log` (heartbeat). `/state` da el reporte completo (PID, último commit, inicio, uptime en segundos) para detectar instancias desactualizadas. `bot_status.ps1` (Windows) lee `.bot.pid`, verifica que el PID vive y compara el commit con `git rev-parse --short HEAD`, reportando vivo-actualizado / vivo-desactualizado / detenido. (.bot.pid solo es una "notita con el número"; el mutex/file-lock es quien impone la instancia única, por eso se escribe tras adquirir el candado.)
-5. **Ejecución de opencode (`run_opencode`)**: lanza `opencode run --format json --title telegram-bot <prompt>` como subproceso async (`asyncio.create_subprocess_exec`), con timeout de 600s. Si se le pasa un `session_id`, añade `--session <id>` para continuar la conversación; si no, crea una sesión nueva. Devuelve `(reply, session_id)`. Si el parseo JSON no produce texto, hace fallback al stderr limpio.
+5. **Ejecución de opencode (`run_opencode`)**: lanza `opencode run --format json --title telegram-bot <prompt>` como subproceso async (`asyncio.create_subprocess_exec`), con timeout de 600s y `cwd` = el work_dir configurado (ver punto 13). Si se le pasa un `session_id`, añade `--session <id>` para continuar la conversación; si no, crea una sesión nueva. Devuelve `(reply, session_id)`. Si el parseo JSON no produce texto, hace fallback al stderr limpio.
 6. **Resolución del ejecutable (`find_opencode_exe`)**: en Windows npm instala opencode como shim `.cmd` no ejecutable directo; el bot busca el `.exe` real en `%APPDATA%\npm\node_modules/opencode-ai/bin/opencode.exe`. En otros SO usa `shutil.which("opencode")`.
 7. **Parseo JSON (`parse_opencode_output`)**: recorre las líneas JSON (ndjson); extrae `sessionID` y el texto de los eventos `type:"text"` (`part.text`). Une el texto y devuelve `(session_id, reply)`.
 8. **Limpieza (`clean_output`)**: quita códigos ANSI y colapsa espacios/tabs. (Fallback si el JSON no trae texto.)
@@ -49,6 +50,7 @@ opencode-telegram/
     - Los mensajes normales se envían a opencode dentro de la sección activa, y la respuesta continúa esa conversación específica.
     - El formato de `sessions.json` se migró de `chat_id -> session_id` a un formato con secciones: `{ "current": "nombre_seccion", "sections": { "nombre_seccion": "session_id" } }`. La migración es automática al leer un archivo con el formato antiguo.
 12. **Parada (`cmd_stop`)**: solo dueño (si el chat no es dueño, devuelve el mensaje de "No autorizado" con los chat_id); detiene el bot llamando a `application.stop()` (detiene el polling y termina el proceso). No relanza ni limpia sesiones.
+13. **Directorio de trabajo (`config.json` + `get_work_dir`)**: el subproceso de opencode arranca en el directorio definido por el parámetro `work_dir` de `config.json` (no versionado). `load_config()` lee el JSON; `get_work_dir()` valida que la ruta exista y sea un directorio (acepta absolutas, relativas a BASE_DIR, `~` y variables de entorno) y, si falta o es inválida, cae a `BASE_DIR` con un warning en el log. Como las sesiones de opencode son por-proyecto (ligadas al directorio donde se crearon), el bot guarda el work_dir activo en la clave `_work_dir` de `sessions.json` y, al arrancar (`reset_sessions_if_work_dir_changed`, llamado desde `main`), si cambió respecto al anterior borra todas las sesiones y lo registra en el log (las sesiones anteriores a esta función se asumen creadas en `BASE_DIR`). `/state` muestra el work_dir activo. **Ojo con los permisos**: el `opencode.json` del proyecto solo aplica cuando opencode corre en esa carpeta; con un work_dir distinto, las reglas de permisos deben estar en la config global de opencode (`~/.config/opencode/opencode.json`).
 
 ## Configuración de permisos (`opencode.json`)
 
@@ -93,7 +95,7 @@ python -u bot.py
 
 ## Convenciones para contribuir
 
-- No commitear `.env`, `venv/`, `__pycache__/`, `*.log`, `sessions.json` (ya en `.gitignore`).
+- No commitear `.env`, `config.json`, `venv/`, `__pycache__/`, `*.log`, `sessions.json` (ya en `.gitignore`).
 - El bot solo debe ejecutarse en la máquina del propietario.
 - Mantener el límite de 4096 caracteres por mensaje de Telegram.
 - **Los mensajes de commit deben estar en inglés** (todos, sin excepción).

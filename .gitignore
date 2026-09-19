@@ -4,6 +4,7 @@ venv/
 *.pyc
 *.log
 sessions.json
+config.json
 .agents/
 skills-lock.json
 .bot.lock

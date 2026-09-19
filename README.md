@@ -47,14 +47,30 @@ TELEGRAM_TOKEN=your_token_from_botfather
 
 `OWNER_CHAT_ID` is saved automatically the first time you run `/start`.
 
+### Working directory (`config.json`)
+
+By default `opencode run` executes in the bot's project folder. To make it start anywhere else, create a `config.json` file (git-ignored) in the project root with a `work_dir` parameter:
+
+```json
+{
+  "work_dir": "E:\\"
+}
+```
+
+If the file is missing, invalid, or the path is not an existing directory, the bot falls back to the project folder and logs a warning. The active directory is shown by `/state` and in `bot.log`.
+
+> Changing `work_dir` resets all stored sessions on the next startup: opencode sessions are scoped to the directory they were created in, so old ones would not be found under the new path.
+
 ### Permissions (`opencode.json`)
 
-Every message spawns `opencode run` in non-interactive mode, so permission requests are auto-rejected. The project config defines what the bot may do without asking:
+Every message spawns `opencode run` in non-interactive mode, so permission requests are auto-rejected. The config defines what the bot may do without asking:
 
 - `external_directory`: read access to `E:\` and its contents (anything else asks for permission).
 - `bash`: only allowed for query commands (`Get-ChildItem`, `ls`, `dir`, `Test-Path`, `where`).
 
 Adjust the paths and commands to match what you want to allow.
+
+> **Important:** a project-level `opencode.json` only applies when opencode runs in that project directory. If you set a custom `work_dir` in `config.json`, these rules must live in the **global** opencode config (`~/.config/opencode/opencode.json`) so they apply regardless of the working directory.
 
 ## Usage
 
@@ -66,7 +82,7 @@ In Telegram:
 
    - `/start` — verifies the connection and registers your chat as the only authorized one
    - `/help` — shows the available commands
-   - `/state` — full status: PID, the last git commit the running instance was launched from, start time and uptime in seconds
+   - `/state` — full status: PID, the last git commit the running instance was launched from, active work dir, start time and uptime in seconds
    - `/stop` — stops the bot
    - `/sections` — lists your sections (contexts) and shows which one is active
    - `/new <name>` — creates a new section and makes it active (omit the name to auto-generate one)
@@ -81,7 +97,7 @@ Logs are written to `bot.log` and `bot.err.log`.
 Because `run_polling` prints nothing while idle and the process is often launched detached, use these signals to confirm the bot is running:
 
 - **`.bot.pid`** — a file written at startup containing the bot's process ID (first line), plus the git commit it was launched from (`commit=...`) and the start time (`started=...`). Verify the process is alive with `Get-Process -Id (Get-Content .bot.pid)` (PowerShell) or `ps -p $(cat .bot.pid)` (Linux/macOS). It is removed automatically on normal exit (it is git-ignored).
-- **`/state`** — sends the full status: PID, the last commit the running instance came from, start time and uptime in seconds. Use this to detect a **stale instance** (see below).
+- **`/state`** — sends the full status: PID, the last commit the running instance came from, active work dir, start time and uptime in seconds. Use this to detect a **stale instance** (see below).
 
 ### What is a PID and how the status logic works
 
@@ -108,14 +124,14 @@ If the process exists → the bot is running. If it does not → the file is sta
 
 1. The bot listens for messages from the authorized chat (only that `chat_id` gets replies).
 2. Each chat keeps its own opencode sessions organized into **sections** in `sessions.json`. A section is an isolated opencode conversation: the first message in a section creates its session and subsequent messages continue it via `opencode run --format json --session <id> --title <section> <prompt>`, so opencode remembers the conversation per section. Use `/sections`, `/new`, `/use` and `/delete` to manage them. The default section is always `default`; switching sections changes which conversation your next messages feed into.
-3. The JSON output is parsed to extract the reply text and the session id.
-4. The output is cleaned and split into chunks of 4096 characters to respect Telegram's message limit.
+3. Every `opencode run` subprocess starts in the **work dir** configured in `config.json` (or in the project folder if none is set). Because opencode sessions are scoped to the directory they were created in, the bot stores the active work dir in `sessions.json` and resets all sessions automatically on startup when it changes.
+4. The JSON output is parsed to extract the reply text and the session id.
+5. The output is cleaned and split into chunks of 4096 characters to respect Telegram's message limit.
 
 > The old flat format (`chat_id -> session_id`) is migrated automatically to the sectioned format on first read (the existing session becomes the `default` section). To wipe all conversation memory, stop the bot (`/stop` or Ctrl+C) and delete `sessions.json` manually; to require re-registration, also remove `OWNER_CHAT_ID` from `.env`. `sessions.json` is git-ignored.
 
 ## Troubleshooting
 
 - **`[WinError 2]` when sending a message**: on Windows, npm installs opencode as a `.cmd` shim that cannot be executed directly. The bot resolves it automatically by looking for the real exe at `%APPDATA%\npm\node_modules\opencode-ai\bin\opencode.exe`, but you must restart the bot after updating.
-- **Rejected permissions (`permission requested... auto-rejecting`)**: the process is non-interactive; add the matching rule to `opencode.json` (see the Permissions section).
+- **Rejected permissions (`permission requested... auto-rejecting`)**: the process is non-interactive; add the matching rule to `opencode.json` (see the Permissions section). If you use a custom `work_dir`, remember the rules must be in the **global** config (`~/.config/opencode/opencode.json`).
 - **`Ya hay una instancia del bot corriendo` on Linux/macOS** (the `.bot.lock` trap): on non-Windows systems the single-instance lock is a file lock on `.bot.lock` instead of a system mutex. If the bot crashes hard (kill -9, power loss) the lock may not be released and the file can be left behind, so the next launch wrongly thinks another instance is running and exits. Fix: delete `.bot.lock` manually and relaunch. On Windows this does not happen, because the mutex is released automatically by the OS when the process ends. (This note is for future use if you run the bot on a Linux/macOS machine; on Windows it is irrelevant.)
-

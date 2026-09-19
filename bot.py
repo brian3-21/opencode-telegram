@@ -24,6 +24,7 @@ from telegram.ext import (
 
 BASE_DIR = Path(os.environ.get("OPENBOT_DIR") or Path(__file__).resolve().parent)
 ENV_FILE = BASE_DIR / ".env"
+CONFIG_FILE = BASE_DIR / "config.json"
 SESSIONS_FILE = BASE_DIR / "sessions.json"
 LOCK_FILE = BASE_DIR / ".bot.lock"
 PID_FILE = BASE_DIR / ".bot.pid"
@@ -48,6 +49,35 @@ WHITESPACE_RE = re.compile(r"[ \t]+")
 
 def resolve_env() -> dict:
     return dotenv_values(ENV_FILE)
+
+
+def load_config() -> dict:
+    if CONFIG_FILE.is_file():
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError):
+            log.warning("config.json invalido o ilegible; se usan valores por defecto.")
+    return {}
+
+
+def get_work_dir() -> Path:
+    """Working directory for the opencode subprocess.
+
+    Taken from the "work_dir" parameter of config.json (git-ignored). Falls
+    back to BASE_DIR if it is missing, not a directory, or config.json does
+    not exist.
+    """
+    raw = str(load_config().get("work_dir", "")).strip()
+    if raw:
+        candidate = Path(os.path.expandvars(raw)).expanduser()
+        if not candidate.is_absolute():
+            candidate = BASE_DIR / candidate
+        if candidate.is_dir():
+            return candidate.resolve()
+        log.warning("work_dir '%s' no existe o no es un directorio; usando %s", raw, BASE_DIR)
+    return BASE_DIR
 
 
 def get_owner_chat_id() -> str:
@@ -169,6 +199,33 @@ def list_sections(chat_id: int) -> list[str]:
     return list(get_chat_sessions(chat_id).get("sections", {}).keys())
 
 
+WORK_DIR_META_KEY = "_work_dir"
+
+
+def reset_sessions_if_work_dir_changed() -> None:
+    """Clear stored sessions when the configured work_dir changes.
+
+    opencode sessions are per-project (directory-scoped), so sessions created
+    under a different work_dir would not be found and would fail. The active
+    work_dir is stored under a meta key in sessions.json (chat_ids are
+    numeric strings, so "_work_dir" cannot collide).
+    """
+    work_dir = str(get_work_dir())
+    data = load_sessions()
+    stored = data.get(WORK_DIR_META_KEY, "")
+    if stored == work_dir:
+        return
+    had_sessions = any(k != WORK_DIR_META_KEY for k in data)
+    # Sessions pre-dating this feature were created under BASE_DIR (the old
+    # hardcoded cwd), so treat a missing meta key as BASE_DIR.
+    previous = stored or str(BASE_DIR)
+    if had_sessions and previous != work_dir:
+        log.info("work_dir cambio de '%s' a '%s'; sesiones reiniciadas.", previous, work_dir)
+        data = {}
+    data[WORK_DIR_META_KEY] = work_dir
+    save_sessions(data)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     if not get_owner_chat_id():
@@ -258,12 +315,13 @@ async def run_opencode(prompt: str, session_id: str = "", timeout: int = 600, ti
     if session_id:
         args += ["--session", session_id]
     args.append(prompt)
-    log.info("Ejecutando opencode (session=%s): %s", session_id or "<nueva>", prompt[:80])
+    work_dir = get_work_dir()
+    log.info("Ejecutando opencode (session=%s, cwd=%s): %s", session_id or "<nueva>", work_dir, prompt[:80])
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=str(BASE_DIR),
+        cwd=str(work_dir),
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -541,6 +599,7 @@ async def cmd_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📊 Bot state\n"
         "PID: " + str(os.getpid()) + "\n"
         "Last commit: " + commit_info + "\n"
+        "Work dir: " + str(get_work_dir()) + "\n"
         "Started: " + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(STARTED_AT)) + "\n"
         "Uptime: " + str(elapsed) + "s"
     )
@@ -562,6 +621,7 @@ def main() -> None:
     RUN_COMMIT = get_repo_commit()
     write_pid_file()
     atexit.register(remove_pid_file)
+    reset_sessions_if_work_dir_changed()
     token = resolve_env().get("TELEGRAM_TOKEN", "").strip()
     if not token:
         sys.exit("Falta TELEGRAM_TOKEN en .env")
