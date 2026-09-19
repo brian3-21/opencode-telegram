@@ -8,3 +8,4 @@ sessions.json
 skills-lock.json
 .bot.lock
 .bot.pid
+*.bak
