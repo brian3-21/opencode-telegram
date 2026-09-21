@@ -27,7 +27,7 @@ opencode-telegram/
 
 ## Cómo funciona (`bot.py`)
 
-1. **Arranque (`main`)**: lee `TELEGRAM_TOKEN` desde `.env`. Si falta, aborta. Registra handlers y hace `run_polling`.
+1. **Arranque (`main`)**: lee `TELEGRAM_TOKEN` desde `.env`. Si falta, aborta. Registra handlers y hace `run_polling`. Antes del polling verifica conectividad con `has_internet()` (socket TCP a `api.telegram.org:443`, timeout 5s): si no hay internet, registra el error y sale con "Error: no hay conexion a internet. Verifica tu conexion y vuelve a intentarlo." (sin traceback). Además, `run_polling` está envuelto en un `try/except NetworkError` (de `telegram.error`) por si la conexión cae durante el polling o entre el chequeo y el arranque: sale con el mismo mensaje claro.
 2. **Autorización**: solo responde al chat cuyo `chat_id` coincide con `OWNER_CHAT_ID` guardado en `.env`. Si el dueño no está registrado (valor vacío), cualquier chat recibe "No hay dueno registrado. Envía /start para registrar este chat como dueno." Si hay dueño pero el chat no coincide, recibe "No autorizado. (Tu chat_id es X; el dueno registrado es Y.)" — esto ayuda a diagnosticar cuando se escribe desde un grupo/topic distinto al chat privado donde se registró el dueño. El mensaje se genera en el helper `auth_error(chat_id)`.
 3. **Comandos**:
    - `/start`: si no hay owner registrado, guarda el `chat_id` actual como único autorizado (`OWNER_CHAT_ID`) usando `python-dotenv`. Si ya hay dueño y el chat no coincide, devuelve el mensaje de "No autorizado" con los chat_id (ver autorización).

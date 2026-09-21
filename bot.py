@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values, set_key
 from telegram import Update
+from telegram.error import NetworkError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -614,6 +616,14 @@ def start_heartbeat() -> None:
     threading.Thread(target=_loop, daemon=True).start()
 
 
+def has_internet() -> bool:
+    try:
+        with socket.create_connection(("api.telegram.org", 443), timeout=5):
+            return True
+    except OSError:
+        return False
+
+
 def main() -> None:
     global STARTED_AT, RUN_COMMIT
     acquire_single_instance()
@@ -636,9 +646,22 @@ def main() -> None:
     application.add_handler(CommandHandler("delete", cmd_delete))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
+    if not has_internet():
+        log.error("No hay conexion a internet. El bot no puede arrancar.")
+        sys.exit(
+            "Error: no hay conexion a internet. "
+            "Verifica tu conexion y vuelve a intentarlo."
+        )
     start_heartbeat()
     log.info("Bot iniciado. Esperando mensajes...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except NetworkError as exc:
+        log.error("No se pudo conectar con Telegram: %s", exc)
+        sys.exit(
+            "Error de red: no hay conexion a internet. "
+            "Verifica tu conexion y vuelve a intentarlo."
+        )
 
 
 if __name__ == "__main__":
