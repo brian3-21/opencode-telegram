@@ -26,10 +26,10 @@ from telegram.ext import (
 
 BASE_DIR = Path(os.environ.get("OPENBOT_DIR") or Path(__file__).resolve().parent)
 ENV_FILE = BASE_DIR / ".env"
-CONFIG_FILE = BASE_DIR / "config.json"
 SESSIONS_FILE = BASE_DIR / "sessions.json"
 LOCK_FILE = BASE_DIR / ".bot.lock"
 PID_FILE = BASE_DIR / ".bot.pid"
+CONFIG_FILE = BASE_DIR / "config.json"
 MAX_MESSAGE_LEN = 4096
 STARTED_AT = 0.0
 RUN_COMMIT = "unknown"
@@ -51,35 +51,6 @@ WHITESPACE_RE = re.compile(r"[ \t]+")
 
 def resolve_env() -> dict:
     return dotenv_values(ENV_FILE)
-
-
-def load_config() -> dict:
-    if CONFIG_FILE.is_file():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except (json.JSONDecodeError, OSError):
-            log.warning("config.json invalido o ilegible; se usan valores por defecto.")
-    return {}
-
-
-def get_work_dir() -> Path:
-    """Working directory for the opencode subprocess.
-
-    Taken from the "work_dir" parameter of config.json (git-ignored). Falls
-    back to BASE_DIR if it is missing, not a directory, or config.json does
-    not exist.
-    """
-    raw = str(load_config().get("work_dir", "")).strip()
-    if raw:
-        candidate = Path(os.path.expandvars(raw)).expanduser()
-        if not candidate.is_absolute():
-            candidate = BASE_DIR / candidate
-        if candidate.is_dir():
-            return candidate.resolve()
-        log.warning("work_dir '%s' no existe o no es un directorio; usando %s", raw, BASE_DIR)
-    return BASE_DIR
 
 
 def get_owner_chat_id() -> str:
@@ -290,9 +261,10 @@ def find_opencode_exe() -> str:
 OPENCODE_EXE = find_opencode_exe()
 
 
-def parse_opencode_output(text: str) -> tuple[str, str]:
+def parse_opencode_output(text: str):
     session_id = ""
     chunks = []
+    errors = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -304,26 +276,64 @@ def parse_opencode_output(text: str) -> tuple[str, str]:
         sid = event.get("sessionID")
         if sid and not session_id:
             session_id = sid
-        if event.get("type") == "text":
+        etype = event.get("type")
+        if etype == "text":
             part = event.get("part") or {}
             t = part.get("text")
             if t:
                 chunks.append(t)
-    return session_id, "\n".join(chunks).strip()
+        elif etype == "error":
+            err = event.get("error") or {}
+            name = str(err.get("name") or "Error")
+            data = err.get("data") or {}
+            msg = str(data.get("message") or "").strip()
+            if msg:
+                errors.append(name + ": " + msg)
+    reply = "\n".join(chunks).strip()
+    return session_id, reply, errors
+
+
+def get_work_dir() -> Path:
+    """Working directory for opencode runs. Defaults to BASE_DIR; override it
+    with the "work_dir" key in config.json. Relative paths resolve against the
+    bot's folder; ~ and environment variables are expanded."""
+    raw = ""
+    if CONFIG_FILE.is_file():
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            raw = str(data.get("work_dir", "")).strip()
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("config.json invalido (%s); usando la carpeta del bot.", exc)
+    if not raw:
+        return BASE_DIR
+    candidate = Path(os.path.expandvars(os.path.expanduser(raw)))
+    if not candidate.is_absolute():
+        candidate = BASE_DIR / candidate
+    candidate = candidate.resolve()
+    if not candidate.is_dir():
+        raise RuntimeError("La ruta work_dir de config.json no existe: " + str(candidate))
+    return candidate
 
 
 async def run_opencode(prompt: str, session_id: str = "", timeout: int = 600, title: str = "telegram-bot") -> tuple[str, str]:
+    work_dir = get_work_dir()
     args = [OPENCODE_EXE, "run", "--format", "json", "--title", title]
     if session_id:
         args += ["--session", session_id]
     args.append(prompt)
-    work_dir = get_work_dir()
+    env = dict(os.environ)
+    project_config = BASE_DIR / "opencode.json"
+    if project_config.is_file():
+        # Keep the bot's permission rules working no matter the work_dir:
+        # opencode merges this file on top of whatever config the work_dir has.
+        env["OPENCODE_CONFIG"] = str(project_config)
     log.info("Ejecutando opencode (session=%s, cwd=%s): %s", session_id or "<nueva>", work_dir, prompt[:80])
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=str(work_dir),
+        env=env,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -334,9 +344,19 @@ async def run_opencode(prompt: str, session_id: str = "", timeout: int = 600, ti
         raise
     out = stdout.decode("utf-8", errors="replace")
     err = stderr.decode("utf-8", errors="replace")
-    session_id_out, reply = parse_opencode_output(out)
+    session_id_out, reply, errors = parse_opencode_output(out)
     if not reply.strip():
-        reply = clean_output(err) or "Sin respuesta."
+        if errors:
+            reply = "\n".join(errors)
+        elif clean_output(err):
+            reply = clean_output(err)
+        else:
+            log.warning(
+                "opencode termino sin generar texto ni error parseable. stdout: %s | stderr: %s",
+                out[:500],
+                err[:500],
+            )
+            reply = "Sin respuesta: opencode termino sin generar texto ni reportar error. Puede ser un problema del modelo/proveedor en uso (revisa tu cuenta y configuracion de opencode)."
     log.info("opencode termino (session=%s, reply_len=%d)", session_id_out or "<nueva>", len(reply))
     return reply, session_id_out
 
@@ -385,10 +405,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             pass
 
     status_task = asyncio.create_task(update_status())
-    section = get_current_section(chat_id)
-    sid = get_section_session(chat_id, section)
     reply = "Sin respuesta."
     try:
+        reset_sessions_if_work_dir_changed()
+        section = get_current_section(chat_id)
+        sid = get_section_session(chat_id, section)
         reply, new_sid = await run_opencode(prompt, sid, title=section)
         if new_sid:
             set_section_session(chat_id, section, new_sid)
@@ -597,11 +618,15 @@ async def cmd_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     commit_hash = get_repo_commit()
     commit_title = get_commit_title()
     commit_info = f"{commit_title} ({commit_hash})"
+    try:
+        work_dir_info = str(get_work_dir())
+    except RuntimeError as exc:
+        work_dir_info = "INVALIDA: " + str(exc)
     await update.message.reply_text(
         "📊 Bot state\n"
         "PID: " + str(os.getpid()) + "\n"
         "Last commit: " + commit_info + "\n"
-        "Work dir: " + str(get_work_dir()) + "\n"
+        "Work dir: " + work_dir_info + "\n"
         "Started: " + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(STARTED_AT)) + "\n"
         "Uptime: " + str(elapsed) + "s"
     )
@@ -631,7 +656,6 @@ def main() -> None:
     RUN_COMMIT = get_repo_commit()
     write_pid_file()
     atexit.register(remove_pid_file)
-    reset_sessions_if_work_dir_changed()
     token = resolve_env().get("TELEGRAM_TOKEN", "").strip()
     if not token:
         sys.exit("Falta TELEGRAM_TOKEN en .env")

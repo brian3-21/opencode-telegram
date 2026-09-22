@@ -49,17 +49,20 @@ TELEGRAM_TOKEN=your_token_from_botfather
 
 ### Working directory (`config.json`)
 
-By default `opencode run` executes in the bot's project folder. To make it start anywhere else, create a `config.json` file (git-ignored) in the project root with a `work_dir` parameter:
+By default every `opencode run` starts in the bot's project folder. To run sessions in a different directory, create `config.json` (copy `config.example.json`) with:
 
 ```json
 {
-  "work_dir": "E:\\"
+  "work_dir": "D:\\path\\to\\your\\project"
 }
 ```
 
-If the file is missing, invalid, or the path is not an existing directory, the bot falls back to the project folder and logs a warning. The active directory is shown by `/state` and in `bot.log`.
+- Relative paths (like `"."` or `".."`) resolve against the bot's folder; `~` and environment variables (`%VAR%` / `$VAR`) are expanded.
+- The file is re-read on every message, so changes apply immediately — no restart needed.
+- `config.json` is git-ignored because paths are machine-specific; `config.example.json` is tracked as a template. If you prefer the file itself to travel with the repo, remove it from `.gitignore` and commit it.
+- The bot always passes its own `opencode.json` to opencode via `OPENCODE_CONFIG`, so the permission rules keep applying regardless of the working directory.
 
-> Changing `work_dir` resets all stored sessions on the next startup: opencode sessions are scoped to the directory they were created in, so old ones would not be found under the new path.
+Note: opencode sessions are tied to the project directory where they were created, so when the configured `work_dir` changes, all stored sessions are cleared automatically (logged in `bot.log`).
 
 ### Permissions (`opencode.json`)
 
@@ -69,8 +72,6 @@ Every message spawns `opencode run` in non-interactive mode, so permission reque
 - `bash`: only allowed for query commands (`Get-ChildItem`, `ls`, `dir`, `Test-Path`, `where`).
 
 Adjust the paths and commands to match what you want to allow.
-
-> **Important:** a project-level `opencode.json` only applies when opencode runs in that project directory. If you set a custom `work_dir` in `config.json`, these rules must live in the **global** opencode config (`~/.config/opencode/opencode.json`) so they apply regardless of the working directory.
 
 ## Usage
 
@@ -124,7 +125,7 @@ If the process exists → the bot is running. If it does not → the file is sta
 
 1. The bot listens for messages from the authorized chat (only that `chat_id` gets replies).
 2. Each chat keeps its own opencode sessions organized into **sections** in `sessions.json`. A section is an isolated opencode conversation: the first message in a section creates its session and subsequent messages continue it via `opencode run --format json --session <id> --title <section> <prompt>`, so opencode remembers the conversation per section. Use `/sections`, `/new`, `/use` and `/delete` to manage them. The default section is always `default`; switching sections changes which conversation your next messages feed into.
-3. Every `opencode run` subprocess starts in the **work dir** configured in `config.json` (or in the project folder if none is set). Because opencode sessions are scoped to the directory they were created in, the bot stores the active work dir in `sessions.json` and resets all sessions automatically on startup when it changes.
+3. Every `opencode run` subprocess starts in the directory set by `work_dir` in `config.json` (the bot's project folder by default; see Configuration).
 4. The JSON output is parsed to extract the reply text and the session id.
 5. The output is cleaned and split into chunks of 4096 characters to respect Telegram's message limit.
 
@@ -133,5 +134,5 @@ If the process exists → the bot is running. If it does not → the file is sta
 ## Troubleshooting
 
 - **`[WinError 2]` when sending a message**: on Windows, npm installs opencode as a `.cmd` shim that cannot be executed directly. The bot resolves it automatically by looking for the real exe at `%APPDATA%\npm\node_modules\opencode-ai\bin\opencode.exe`, but you must restart the bot after updating.
-- **Rejected permissions (`permission requested... auto-rejecting`)**: the process is non-interactive; add the matching rule to `opencode.json` (see the Permissions section). If you use a custom `work_dir`, remember the rules must be in the **global** config (`~/.config/opencode/opencode.json`).
+- **Rejected permissions (`permission requested... auto-rejecting`)**: the process is non-interactive; add the matching rule to `opencode.json` (see the Permissions section).
 - **`Ya hay una instancia del bot corriendo` on Linux/macOS** (the `.bot.lock` trap): on non-Windows systems the single-instance lock is a file lock on `.bot.lock` instead of a system mutex. If the bot crashes hard (kill -9, power loss) the lock may not be released and the file can be left behind, so the next launch wrongly thinks another instance is running and exits. Fix: delete `.bot.lock` manually and relaunch. On Windows this does not happen, because the mutex is released automatically by the OS when the process ends. (This note is for future use if you run the bot on a Linux/macOS machine; on Windows it is irrelevant.)
