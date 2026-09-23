@@ -100,22 +100,38 @@ def clear_sessions() -> None:
         SESSIONS_FILE.unlink()
 
 
+def _migrate_section(value: object) -> dict:
+    """Sections used to be stored as a bare session-id string. The new format
+    is an object: session id, route name (portable across machines; each PC's
+    config.json resolves it) and the directory the session was created in."""
+    if isinstance(value, dict):
+        return {
+            "session": str(value.get("session") or ""),
+            "route": str(value.get("route") or ""),
+            "dir": str(value.get("dir") or ""),
+        }
+    return {"session": str(value or ""), "route": "", "dir": ""}
+
+
 def _migrate_chat(value: object) -> dict:
     """Old format stored chat_id -> session_id (string). New format stores a
-    dict with the current section and a map of section name -> session id."""
+    dict with the current section and a map of section name -> section object."""
     if isinstance(value, dict) and "sections" in value:
-        if "current" not in value or value.get("current") not in value.get("sections", {}):
-            value["current"] = next(iter(value.get("sections", {})), DEFAULT_SECTION)
+        value["sections"] = {
+            k: _migrate_section(v) for k, v in (value.get("sections") or {}).items()
+        }
+        if "current" not in value or value.get("current") not in value["sections"]:
+            value["current"] = next(iter(value["sections"]), DEFAULT_SECTION)
         return value
     session_id = value if isinstance(value, str) else ""
-    return {"current": DEFAULT_SECTION, "sections": {DEFAULT_SECTION: session_id}}
+    return {"current": DEFAULT_SECTION, "sections": {DEFAULT_SECTION: _migrate_section(session_id)}}
 
 
 def get_chat_sessions(chat_id: int) -> dict:
     data = load_sessions()
     value = data.get(str(chat_id))
     if value is None:
-        return {"current": DEFAULT_SECTION, "sections": {DEFAULT_SECTION: ""}}
+        return {"current": DEFAULT_SECTION, "sections": {DEFAULT_SECTION: _migrate_section("")}}
     return _migrate_chat(value)
 
 
@@ -129,23 +145,34 @@ def get_current_section(chat_id: int) -> str:
     return get_chat_sessions(chat_id).get("current") or DEFAULT_SECTION
 
 
-def get_section_session(chat_id: int, name: str) -> str:
-    return get_chat_sessions(chat_id).get("sections", {}).get(name, "")
+def get_section(chat_id: int, name: str) -> dict:
+    return get_chat_sessions(chat_id).get("sections", {}).get(name) or _migrate_section("")
 
 
 def set_section_session(chat_id: int, name: str, session_id: str) -> None:
     chat_data = get_chat_sessions(chat_id)
-    chat_data["sections"][name] = session_id
+    section = chat_data["sections"].setdefault(name, _migrate_section(""))
+    section["session"] = session_id
     chat_data["current"] = name
     save_chat_sessions(chat_id, chat_data)
 
 
-def create_section(chat_id: int, name: str) -> None:
+def set_section_dir(chat_id: int, name: str, work_dir: str) -> None:
     chat_data = get_chat_sessions(chat_id)
-    if name not in chat_data["sections"]:
-        chat_data["sections"][name] = ""
+    section = chat_data["sections"].get(name)
+    if section is not None and section.get("dir") != work_dir:
+        section["dir"] = work_dir
+        save_chat_sessions(chat_id, chat_data)
+
+
+def create_section(chat_id: int, name: str, route: str, work_dir: str) -> bool:
+    chat_data = get_chat_sessions(chat_id)
+    if name in chat_data["sections"]:
+        return False
+    chat_data["sections"][name] = {"session": "", "route": route, "dir": work_dir}
     chat_data["current"] = name
     save_chat_sessions(chat_id, chat_data)
+    return True
 
 
 def switch_section(chat_id: int, name: str) -> bool:
@@ -159,9 +186,11 @@ def switch_section(chat_id: int, name: str) -> bool:
 
 def delete_section(chat_id: int, name: str) -> bool:
     chat_data = get_chat_sessions(chat_id)
-    if name not in chat_data["sections"] or name == DEFAULT_SECTION and len(chat_data["sections"]) <= 1:
+    if name not in chat_data["sections"]:
         return False
     del chat_data["sections"][name]
+    if not chat_data["sections"]:
+        chat_data["sections"][DEFAULT_SECTION] = _migrate_section("")
     if chat_data["current"] == name:
         chat_data["current"] = next(iter(chat_data["sections"]), DEFAULT_SECTION)
     save_chat_sessions(chat_id, chat_data)
@@ -172,31 +201,8 @@ def list_sections(chat_id: int) -> list[str]:
     return list(get_chat_sessions(chat_id).get("sections", {}).keys())
 
 
-WORK_DIR_META_KEY = "_work_dir"
-
-
-def reset_sessions_if_work_dir_changed() -> None:
-    """Clear stored sessions when the configured work_dir changes.
-
-    opencode sessions are per-project (directory-scoped), so sessions created
-    under a different work_dir would not be found and would fail. The active
-    work_dir is stored under a meta key in sessions.json (chat_ids are
-    numeric strings, so "_work_dir" cannot collide).
-    """
-    work_dir = str(get_work_dir())
-    data = load_sessions()
-    stored = data.get(WORK_DIR_META_KEY, "")
-    if stored == work_dir:
-        return
-    had_sessions = any(k != WORK_DIR_META_KEY for k in data)
-    # Sessions pre-dating this feature were created under BASE_DIR (the old
-    # hardcoded cwd), so treat a missing meta key as BASE_DIR.
-    previous = stored or str(BASE_DIR)
-    if had_sessions and previous != work_dir:
-        log.info("work_dir cambio de '%s' a '%s'; sesiones reiniciadas.", previous, work_dir)
-        data = {}
-    data[WORK_DIR_META_KEY] = work_dir
-    save_sessions(data)
+def route_label(route: str) -> str:
+    return route if route else "(carpeta del bot)"
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -227,8 +233,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/help - Mostrar esta ayuda\n"
         "/state - Estado del bot: PID, ultimo commit, inicio y tiempo activo (segundos)\n"
         "/stop - Detener el bot\n"
-        "/sections - Listar tus secciones (contextos) y ver la activa\n"
-        "/new <nombre> - Crear una seccion nueva y activarla (sin nombre crea una auto)\n"
+        "/sections - Listar tus secciones (contextos) con su ruta y ver la activa\n"
+        "/new <nombre> [ruta] - Crear una seccion nueva y activarla (nombre de una palabra;\n"
+        "  ruta opcional definida en config.json; sin args crea una auto con la default_route)\n"
         "/use <nombre> - Cambiar a una seccion existente\n"
         "/delete <nombre> - Borrar una seccion\n"
         "Cualquier otro mensaje se envia a opencode dentro de la seccion activa."
@@ -293,30 +300,60 @@ def parse_opencode_output(text: str):
     return session_id, reply, errors
 
 
-def get_work_dir() -> Path:
-    """Working directory for opencode runs. Defaults to BASE_DIR; override it
-    with the "work_dir" key in config.json. Relative paths resolve against the
-    bot's folder; ~ and environment variables are expanded."""
-    raw = ""
+def load_config() -> dict:
+    """Read config.json (machine-specific). Returns {} on missing/invalid file."""
     if CONFIG_FILE.is_file():
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            raw = str(data.get("work_dir", "")).strip()
+            if isinstance(data, dict):
+                return data
         except (json.JSONDecodeError, OSError) as exc:
-            log.warning("config.json invalido (%s); usando la carpeta del bot.", exc)
-    if not raw:
-        return BASE_DIR
+            log.warning("config.json invalido (%s); usando valores por defecto.", exc)
+    return {}
+
+
+def resolve_path(raw: str, label: str) -> Path:
+    """Expand ~ and env vars, resolve relative paths against BASE_DIR and
+    require the folder to exist. Raises RuntimeError with a clear message."""
     candidate = Path(os.path.expandvars(os.path.expanduser(raw)))
     if not candidate.is_absolute():
         candidate = BASE_DIR / candidate
     candidate = candidate.resolve()
     if not candidate.is_dir():
-        raise RuntimeError("La ruta work_dir de config.json no existe: " + str(candidate))
+        raise RuntimeError("La ruta '" + label + "' no existe en disco: " + str(candidate))
     return candidate
 
 
-async def run_opencode(prompt: str, session_id: str = "", timeout: int = 600, title: str = "telegram-bot") -> tuple[str, str]:
-    work_dir = get_work_dir()
+def get_routes() -> dict[str, str]:
+    routes = load_config().get("routes", {})
+    if not isinstance(routes, dict):
+        log.warning("config.json: 'routes' debe ser un objeto de nombre->path; ignorado.")
+        return {}
+    return {str(k): str(v) for k, v in routes.items() if str(v).strip()}
+
+
+def get_default_route() -> str:
+    return str(load_config().get("default_route", "")).strip()
+
+
+def resolve_route(name: str) -> Path:
+    routes = get_routes()
+    if name not in routes:
+        avail = ", ".join(sorted(routes)) or "(ninguna definida en config.json)"
+        raise RuntimeError(
+            "La ruta '" + name + "' no existe en config.json. Rutas disponibles: " + avail + "."
+        )
+    return resolve_path(routes[name], name)
+
+
+def get_section_dir(route: str) -> Path:
+    """Effective cwd for a section: the named route, or BASE_DIR when empty."""
+    if route:
+        return resolve_route(route)
+    return BASE_DIR
+
+
+async def _opencode_attempt(prompt: str, work_dir: Path, session_id: str, timeout: int, title: str):
     args = [OPENCODE_EXE, "run", "--format", "json", "--title", title]
     if session_id:
         args += ["--session", session_id]
@@ -345,6 +382,21 @@ async def run_opencode(prompt: str, session_id: str = "", timeout: int = 600, ti
     out = stdout.decode("utf-8", errors="replace")
     err = stderr.decode("utf-8", errors="replace")
     session_id_out, reply, errors = parse_opencode_output(out)
+    return session_id_out, reply, errors, proc.returncode, out, err
+
+
+async def run_opencode(prompt: str, work_dir: Path, session_id: str = "", timeout: int = 600, title: str = "telegram-bot") -> tuple[str, str]:
+    # The provider sometimes returns an empty completion and opencode exits 0
+    # without emitting text or an error event; retry once before giving up.
+    sid = session_id
+    session_id_out, reply, errors, returncode, out, err = await _opencode_attempt(prompt, work_dir, sid, timeout, title)
+    if session_id_out:
+        sid = session_id_out
+    if not reply.strip() and not errors and not clean_output(err):
+        log.warning("opencode devolvio una respuesta vacia (rc=%s); reintentando.", returncode)
+        session_id_out, reply, errors, returncode, out, err = await _opencode_attempt(prompt, work_dir, sid, timeout, title)
+        if session_id_out:
+            sid = session_id_out
     if not reply.strip():
         if errors:
             reply = "\n".join(errors)
@@ -352,13 +404,14 @@ async def run_opencode(prompt: str, session_id: str = "", timeout: int = 600, ti
             reply = clean_output(err)
         else:
             log.warning(
-                "opencode termino sin generar texto ni error parseable. stdout: %s | stderr: %s",
+                "opencode termino sin generar texto ni error parseable (rc=%s). stdout: %s | stderr: %s",
+                returncode,
                 out[:500],
                 err[:500],
             )
-            reply = "Sin respuesta: opencode termino sin generar texto ni reportar error. Puede ser un problema del modelo/proveedor en uso (revisa tu cuenta y configuracion de opencode)."
-    log.info("opencode termino (session=%s, reply_len=%d)", session_id_out or "<nueva>", len(reply))
-    return reply, session_id_out
+            reply = "Sin respuesta: opencode termino sin generar texto ni reportar error (se reintento una vez). Puede ser un problema del modelo/proveedor en uso (revisa tu cuenta y configuracion de opencode)."
+    log.info("opencode termino (session=%s, reply_len=%d)", sid or "<nueva>", len(reply))
+    return reply, sid
 
 
 def split_long(text: str, limit: int = MAX_MESSAGE_LEN) -> list[str]:
@@ -407,12 +460,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     status_task = asyncio.create_task(update_status())
     reply = "Sin respuesta."
     try:
-        reset_sessions_if_work_dir_changed()
         section = get_current_section(chat_id)
-        sid = get_section_session(chat_id, section)
-        reply, new_sid = await run_opencode(prompt, sid, title=section)
-        if new_sid:
-            set_section_session(chat_id, section, new_sid)
+        sec = get_section(chat_id, section)
+        sid = sec.get("session", "")
+        route = sec.get("route", "")
+        try:
+            work_dir = get_section_dir(route)
+        except RuntimeError as exc:
+            reply = "Error de ruta en la seccion '" + section + "': " + str(exc)
+        else:
+            stored_dir = sec.get("dir", "")
+            if sid and stored_dir and str(work_dir) != stored_dir:
+                reply = (
+                    "La seccion '" + section + "' nacio en " + stored_dir
+                    + " pero su ruta '" + route_label(route) + "' ahora apunta a " + str(work_dir)
+                    + ". Corrige config.json o reinicia la seccion: /delete " + section
+                    + " y /new " + section + " " + route
+                )
+            else:
+                if stored_dir != str(work_dir):
+                    set_section_dir(chat_id, section, str(work_dir))
+                reply, new_sid = await run_opencode(prompt, work_dir, sid, title=section)
+                if new_sid:
+                    set_section_session(chat_id, section, new_sid)
     except asyncio.TimeoutError:
         reply = "La consulta tardo demasiado (>600s) y fue cancelada."
         log.error("Timeout atendiendo mensaje de %s", chat_id)
@@ -458,12 +528,17 @@ async def cmd_sections(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_data = get_chat_sessions(chat_id)
     current = chat_data.get("current") or DEFAULT_SECTION
     lines = ["📚 Secciones (contextos):"]
-    for name in chat_data.get("sections", {}):
+    for name, sec in chat_data.get("sections", {}).items():
         marker = "➡️ " if name == current else "   "
         active = " (activa)" if name == current else ""
-        lines.append(marker + name + active)
+        route = sec.get("route", "")
+        try:
+            work_dir = str(get_section_dir(route))
+            lines.append(marker + name + active + " - ruta: " + route_label(route) + " -> " + work_dir)
+        except RuntimeError as exc:
+            lines.append(marker + name + active + " - ruta: " + route_label(route) + " (INVALIDA: " + str(exc) + ")")
     lines.append("")
-    lines.append("Usa /new <nombre> para crear una seccion, /use <nombre> para cambiar, /delete <nombre> para borrar.")
+    lines.append("Usa /new <nombre> [ruta] para crear una seccion, /use <nombre> para cambiar, /delete <nombre> para borrar.")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -472,16 +547,40 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(chat_id):
         await update.message.reply_text(auth_error(chat_id))
         return
-    if context.args:
-        name = " ".join(context.args).strip()
-    else:
+    args = context.args or []
+    route_arg = ""
+    if not args:
         name = DEFAULT_SECTION + "-" + str(len(get_chat_sessions(chat_id).get("sections", {})) + 1)
-    if not name:
-        await update.message.reply_text("Nombre de seccion invalido.")
+    elif len(args) == 1:
+        name = args[0].strip()
+    elif len(args) == 2:
+        name, route_arg = args[0].strip(), args[1].strip()
+    else:
+        await update.message.reply_text("Uso: /new <nombre> [ruta]. Usa /sections para ver tus secciones y sus rutas.")
         return
-    create_section(chat_id, name)
+    if not name or " " in name:
+        await update.message.reply_text("Nombre de seccion invalido (una sola palabra, sin espacios).")
+        return
+    if name in get_chat_sessions(chat_id).get("sections", {}):
+        if route_arg:
+            await update.message.reply_text(
+                "La seccion '" + name + "' ya existe. Para cambiarle la ruta primero /delete " + name + "."
+            )
+            return
+        switch_section(chat_id, name)
+        await update.message.reply_text("La seccion '" + name + "' ya existia; la he activado.")
+        return
+    route = route_arg or get_default_route()
+    try:
+        work_dir = get_section_dir(route)
+    except RuntimeError as exc:
+        await update.message.reply_text("Error: " + str(exc))
+        return
+    create_section(chat_id, name, route, str(work_dir))
     await update.message.reply_text(
-        "Seccion '" + name + "' creada y activada. El primer mensaje que envies iniciara su contexto en opencode."
+        "Seccion '" + name + "' creada y activada.\n"
+        "Ruta: " + route_label(route) + " -> " + str(work_dir) + "\n"
+        "El primer mensaje que envies iniciara su contexto en opencode."
     )
 
 
@@ -495,7 +594,13 @@ async def cmd_use(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     name = " ".join(context.args).strip()
     if switch_section(chat_id, name):
-        await update.message.reply_text("Ahora estas en la seccion '" + name + "'.")
+        sec = get_section(chat_id, name)
+        route = sec.get("route", "")
+        try:
+            info = " (ruta: " + route_label(route) + " -> " + str(get_section_dir(route)) + ")"
+        except RuntimeError as exc:
+            info = " (ruta: " + route_label(route) + " INVALIDA: " + str(exc) + ")"
+        await update.message.reply_text("Ahora estas en la seccion '" + name + "'." + info)
     else:
         await update.message.reply_text("No existe la seccion '" + name + "'.")
 
@@ -509,9 +614,6 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("Uso: /delete <nombre>. Usa /sections para ver las disponibles.")
         return
     name = " ".join(context.args).strip()
-    if name == DEFAULT_SECTION:
-        await update.message.reply_text("No puedes borrar la seccion '" + DEFAULT_SECTION + "'.")
-        return
     if delete_section(chat_id, name):
         await update.message.reply_text("Seccion '" + name + "' borrada.")
     else:
@@ -618,15 +720,20 @@ async def cmd_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     commit_hash = get_repo_commit()
     commit_title = get_commit_title()
     commit_info = f"{commit_title} ({commit_hash})"
+    default_route = get_default_route()
     try:
-        work_dir_info = str(get_work_dir())
+        routes_info = (
+            "default_route: " + (route_label(default_route) if default_route else "(sin default)")
+            + " -> " + str(get_section_dir(default_route))
+            + " | rutas definidas: " + str(len(get_routes()))
+        )
     except RuntimeError as exc:
-        work_dir_info = "INVALIDA: " + str(exc)
+        routes_info = "default_route INVALIDA: " + str(exc)
     await update.message.reply_text(
         "📊 Bot state\n"
         "PID: " + str(os.getpid()) + "\n"
         "Last commit: " + commit_info + "\n"
-        "Work dir: " + work_dir_info + "\n"
+        "Routes: " + routes_info + "\n"
         "Started: " + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(STARTED_AT)) + "\n"
         "Uptime: " + str(elapsed) + "s"
     )
@@ -659,6 +766,11 @@ def main() -> None:
     token = resolve_env().get("TELEGRAM_TOKEN", "").strip()
     if not token:
         sys.exit("Falta TELEGRAM_TOKEN en .env")
+    if "work_dir" in load_config():
+        log.warning(
+            "config.json: 'work_dir' fue eliminado y se ignora; "
+            "definelo como ruta con nombre en 'routes' (ver config.example.json)."
+        )
     application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))

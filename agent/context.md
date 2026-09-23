@@ -14,6 +14,8 @@ Permite usar opencode y, por extensión, la PC del usuario, de forma remota desd
 opencode-telegram/
 ├── bot.py            # Lógica principal del bot de Telegram
 ├── opencode.json     # Config de permisos de opencode (qué puede hacer el bot)
+├── config.example.json # Template versionado de config.json (routes)
+├── config.json       # No versionado: rutas con nombre por sección (por máquina)
 ├── requirements.txt  # Dependencias de Python
 ├── README.md         # Documentación de instalación y uso
 ├── .env              # No versionado: TELEGRAM_TOKEN y OWNER_CHAT_ID
@@ -35,20 +37,29 @@ opencode-telegram/
    - `/stop`: detiene el bot (detiene el polling y termina el proceso). Solo lo puede usar el dueño.
 4. **Mensajes normales (`handle_message`)**: manda un "Pensando...", llama a opencode, borra el "Pensando..." y responde con la salida.
 5. **Indicadores de estado**: al arrancar (tras `acquire_single_instance`) captura `STARTED_AT` y `RUN_COMMIT` (commit de git vía `get_repo_commit()`, con fallback `"unknown"`) y escribe `.bot.pid` con 3 líneas: `<pid>`, `commit=<hash>`, `started=<fecha>`; registra `atexit` para borrarlo al salir normalmente (no hay un comando de reinicio que lo borre antes, dado que `/reset` fue eliminado). Un hilo en segundo plano (`start_heartbeat`, daemon) registra cada 5 min `Bot vivo - HH:MM` en consola y `bot.log` (heartbeat). `/state` da el reporte completo (PID, último commit, inicio, uptime en segundos) para detectar instancias desactualizadas. `bot_status.ps1` (Windows) lee `.bot.pid`, verifica que el PID vive y compara el commit con `git rev-parse --short HEAD`, reportando vivo-actualizado / vivo-desactualizado / detenido. (.bot.pid solo es una "notita con el número"; el mutex/file-lock es quien impone la instancia única, por eso se escribe tras adquirir el candado.)
-5. **Ejecución de opencode (`run_opencode`)**: lanza `opencode run --format json --title telegram-bot <prompt>` como subproceso async (`asyncio.create_subprocess_exec`), con timeout de 600s y `cwd` = `BASE_DIR` (el directorio del bot). Si se le pasa un `session_id`, añade `--session <id>` para continuar la conversación; si no, crea una sesión nueva. Devuelve `(reply, session_id)`. Si el parseo JSON no produce texto, muestra los errores detectados del stream (p. ej. `AI_APICallError`) o hace fallback al stderr limpio; si tampoco hay error, explica que opencode terminó sin generar texto y sugiere revisar el modelo/proveedor.
+5. **Ejecución de opencode (`run_opencode`)**: lanza `opencode run --format json --title telegram-bot <prompt>` como subproceso async (`asyncio.create_subprocess_exec`), con timeout de 600s y `cwd` = el directorio resuelto de la ruta de la sección activa (se le pasa como parámetro `work_dir`; ver sistema de secciones). Si se le pasa un `session_id`, añade `--session <id>` para continuar la conversación; si no, crea una sesión nueva. Devuelve `(reply, session_id)`. Si el parseo JSON no produce texto, muestra los errores detectados del stream (p. ej. `AI_APICallError`) o hace fallback al stderr limpio; si tampoco hay error, explica que opencode terminó sin generar texto y sugiere revisar el modelo/proveedor. **Reintento automático**: el proveedor a veces devuelve completions vacíos y opencode sale con rc=0 sin emitir texto ni error; `run_opencode` detecta ese caso (sin texto, sin errores, sin stderr) y reintenta una vez antes de dar el mensaje de "Sin respuesta" (el log muestra `opencode devolvio una respuesta vacia (rc=...); reintentando`).
 6. **Resolución del ejecutable (`find_opencode_exe`)**: en Windows npm instala opencode como shim `.cmd` no ejecutable directo; el bot busca el `.exe` real en `%APPDATA%\npm\node_modules/opencode-ai/bin/opencode.exe`. En otros SO usa `shutil.which("opencode")`.
 7. **Parseo JSON (`parse_opencode_output`)**: recorre las líneas JSON (ndjson); extrae `sessionID`, el texto de los eventos `type:"text"` (`part.text`) y los mensajes de los eventos `type:"error"` (`error.name` + `error.data.message`). Devuelve `(session_id, reply, errors)`. Si no hay texto pero hay errores, `run_opencode` responde con el error real (p. ej. `AI_APICallError: Insufficient account funds`) en lugar de un "Sin respuesta." genérico; si no hay ni texto ni errores, cae al stderr limpio y, por último, a un mensaje que indica que opencode terminó sin generar texto y sugiere revisar el modelo/proveedor y la cuenta.
 8. **Limpieza (`clean_output`)**: quita códigos ANSI y colapsa espacios/tabs. (Fallback si el JSON no trae texto.)
 9. **Particionado (`split_long`)**: divide la respuesta en chunks de 4096 chars cortando por saltos de línea.
-10. **Sesiones por chat**: `sessions.json` mapea `chat_id -> session_id` (`load_sessions`/`save_sessions`/`get_session_id`/`set_session_id`/`clear_sessions`). `handle_message` recupera el session del chat, lo pasa a `run_opencode` y guarda el nuevo.
-11. **Sistema de secciones/contextos**: A partir de esta versión, el bot organiza las sesiones de opencode en secciones (contextos) para mantener conversaciones separadas. Cada chat puede tener múltiples secciones, cada una con su propia conversación continua con opencode.
-    - El comando `/sections` lista las secciones disponibles y muestra cuál está activa.
-    - El comando `/new <nombre>` crea una nueva sección y la activa. Si no se proporciona nombre, se genera automáticamente.
-    - El comando `/use <nombre>` cambia la sección activa.
-    - El comando `/delete <nombre>` elimina una sección (no se puede borrar la sección "default" si es la única).
-    - Los mensajes normales se envían a opencode dentro de la sección activa, y la respuesta continúa esa conversación específica.
-    - El formato de `sessions.json` se migró de `chat_id -> session_id` a un formato con secciones: `{ "current": "nombre_seccion", "sections": { "nombre_seccion": "session_id" } }`. La migración es automática al leer un archivo con el formato antiguo.
+10. **Sesiones por chat**: `sessions.json` mapea `chat_id -> {current, sections}` (`load_sessions`/`save_sessions`/`get_chat_sessions`/`save_chat_sessions`). Cada sección guarda un objeto `{session, route, dir}`: el id de sesión de opencode, el **nombre** de ruta (portable entre PCs: se resuelve contra el `config.json` local) y el directorio resuelto donde nació la sesión. `handle_message` recupera la sección activa, resuelve su directorio y pasa el session a `run_opencode`.
+11. **Sistema de secciones/rutas**: el bot organiza las sesiones en secciones (contextos), cada una con su conversación continua con opencode y su **ruta** de trabajo.
+    - `/sections` lista las secciones mostrando su ruta resuelta (`nombre -> path`; marca `INVALIDA` si la ruta no está en `config.json` o falta la carpeta) y cuál está activa.
+    - `/new <nombre> [ruta]` crea una sección y la activa. El nombre es de una sola palabra. Sin `ruta` usa `default_route` de `config.json` (si no hay, `BASE_DIR`). Valida que la ruta exista en `routes` y que la carpeta esté en disco (error claro si no). Si el nombre ya existe: con `ruta` → error (hay que `/delete` primero); sin `ruta` → solo la activa.
+    - `/use <nombre>` cambia la sección activa y avisa en qué ruta quedaste parado.
+    - `/delete <nombre>` elimina una sección; ahora se puede borrar `default` (si era la única, se recrea vacía automáticamente).
+    - **Invalidación por directorio**: las sesiones de opencode van atadas al directorio donde nacieron. Si la ruta de una sección con sesión guarda ahora resuelve a otro directorio, el bot NO ejecuta y responde un error claro (corregir `config.json` o `/delete` + `/new`). Esto reemplazó al viejo reset global por cambio de `work_dir` (clave eliminada; si aún aparece en el config, el bot avisa al arrancar y la ignora).
+    - El formato de `sessions.json` migra automáticamente: string plano `chat_id -> session_id` y secciones guardadas como string → objeto `{session, route: "", dir: ""}` (la ruta queda vacía hasta que el dueño la fije con `/new`).
 12. **Parada (`cmd_stop`)**: solo dueño (si el chat no es dueño, devuelve el mensaje de "No autorizado" con los chat_id); detiene el bot llamando a `application.stop()` (detiene el polling y termina el proceso). No relanza ni limpia sesiones.
+
+## Rutas por sección (`config.json`)
+
+Configuración específica de cada máquina (gitignored; el template versionado es `config.example.json`):
+- `routes`: mapa `nombre -> carpeta`. Los relativos se resuelven contra `BASE_DIR`; se expanden `~` y variables de entorno; la carpeta debe existir en disco.
+- `default_route`: nombre de ruta que heredan las secciones nuevas al hacer `/new <nombre>` sin ruta.
+- `work_dir` fue **eliminado**: `routes` es el único mecanismo. Si la clave sigue en el config, el bot lo avisa al arrancar y la ignora.
+- En `sessions.json` se guarda el **nombre** de la ruta (no el path absoluto), para que las mismas secciones signifiquen lo mismo en PCs con filesystems distintos.
+- `config.json` se relee en cada mensaje; no hace falta reiniciar el bot.
 
 ## Configuración de permisos (`opencode.json`)
 

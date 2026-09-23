@@ -10,23 +10,11 @@
   - Usar un `asyncio.Lock` o `asyncio.Queue` por chat (o por sección).
   - Avisar por Telegram cuando un mensaje queda en espera (ej: "En cola, hay N mensajes antes").
 
-- [ ] **Rutas predefinidas por sección**: definir en el archivo de configuración rutas con nombre y poder elegir cuál es la ruta por defecto, para que cada sección trabaje en su propia carpeta.
-  - En `config.json` agregar algo como:
-    ```json
-    {
-      "work_dir": ".",
-      "routes": {
-        "proyectoA": "E:/codigo/proyectoA",
-        "proyectoB": "E:/codigo/proyectoB"
-      },
-      "default_route": "proyectoA"
-    }
-    ```
-  - `default_route` indica la ruta en la que siempre empiezan las secciones nuevas (si no existe, se usa `work_dir` como hoy).
-  - Extender `/new` para aceptar una ruta opcional: `/new <nombre> [ruta]`.
-    - `/new api proyectoA` → crea la sección "api" trabajando en `E:/codigo/proyectoA`.
-    - `/new api` → crea la sección "api" trabajando en la `default_route`.
-  - Guardar la ruta de cada sección en `sessions.json` y que `run_opencode` la use como `cwd` al lanzar opencode.
-  - `/sections` debería mostrar la ruta de cada sección, y `/use` podría avisar en qué ruta quedaste parado.
-  - Validar que el nombre de ruta exista en `routes` y que la carpeta exista en disco (error claro si no).
-  - Actualizar `/help` y el README.
+- [x] **Rutas predefinidas por sección**: rutas con nombre en `config.json` para que cada sección trabaje en su propia carpeta.
+  - Diseño final: `work_dir` fue **eliminado** (era un solo mecanismo redundante con las rutas). `config.json` ahora tiene `routes` (nombre -> carpeta) y `default_route`.
+  - `/new <nombre> [ruta]` crea la sección en esa ruta (valida que exista en `routes` y que la carpeta esté en disco; error claro si no). Nombre de una sola palabra.
+  - `sessions.json` guarda por sección `{session, route, dir}`: el **nombre** de ruta (portable entre PCs con filesystems distintos, cada `config.json` local lo resuelve) y el directorio donde nació la sesión.
+  - `run_opencode` recibe el `cwd` de la sección activa como parámetro.
+  - `/sections` muestra la ruta de cada sección y `/use` avisa en qué ruta quedaste.
+  - Si la ruta de una sección con sesión ahora apunta a otro directorio, el bot no ejecuta y da error claro (el dueño corrige config.json o hace /delete + /new).
+  - `/help` y README actualizados.

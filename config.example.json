@@ -1,3 +1,8 @@
 {
-  "work_dir": "."
+  "routes": {
+    "bot": ".",
+    "proyectoA": "E:/codigo/proyectoA",
+    "proyectoB": "E:/codigo/proyectoB"
+  },
+  "default_route": "bot"
 }
