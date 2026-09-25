@@ -1,8 +1,7 @@
 {
   "routes": {
     "bot": ".",
-    "proyectoA": "E:/codigo/proyectoA",
-    "proyectoB": "E:/codigo/proyectoB"
+    "whatsappBot": "E:/code/whatsapp-bot"
   },
-  "default_route": "bot"
+  "default_route": "whatsappBot"
 }
