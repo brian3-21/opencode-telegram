@@ -309,14 +309,20 @@ def get_default_route() -> str:
     return str(load_config().get("default_route", "")).strip()
 
 
+def looks_like_path(value: str) -> bool:
+    return "/" in value or "\\" in value or (len(value) > 1 and value[1] == ":")
+
+
 def resolve_route(name: str) -> Path:
     routes = get_routes()
-    if name not in routes:
-        avail = ", ".join(sorted(routes)) or "(ninguna definida en config.json)"
-        raise RuntimeError(
-            "La ruta '" + name + "' no existe en config.json. Rutas disponibles: " + avail + "."
-        )
-    return resolve_path(routes[name], name)
+    if name in routes:
+        return resolve_path(routes[name], name)
+    if looks_like_path(name):
+        return resolve_path(name, name)
+    avail = ", ".join(sorted(routes)) or "(ninguna definida en config.json)"
+    raise RuntimeError(
+        "La ruta '" + name + "' no existe en config.json. Rutas disponibles: " + avail + "."
+    )
 
 
 def get_section_dir(route: str) -> Path:
