@@ -4,7 +4,6 @@ import json
 import atexit
 import logging
 import os
-import re
 import shutil
 import socket
 import subprocess
@@ -23,6 +22,8 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
+from oc_server import OpencodeError, OpencodeServer
 
 BASE_DIR = Path(os.environ.get("OPENBOT_DIR") or Path(__file__).resolve().parent)
 ENV_FILE = BASE_DIR / ".env"
@@ -44,9 +45,6 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("opencode-telegram")
-
-ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
-WHITESPACE_RE = re.compile(r"[ \t]+")
 
 
 def resolve_env() -> dict:
@@ -242,12 +240,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def clean_output(text: str) -> str:
-    text = ANSI_RE.sub("", text)
-    text = WHITESPACE_RE.sub(" ", text)
-    return text.strip()
-
-
 def find_opencode_exe() -> str:
     if os.name != "nt":
         return shutil.which("opencode") or "opencode"
@@ -266,38 +258,19 @@ def find_opencode_exe() -> str:
 
 
 OPENCODE_EXE = find_opencode_exe()
+OC_SERVER: OpencodeServer | None = None
 
 
-def parse_opencode_output(text: str):
-    session_id = ""
-    chunks = []
-    errors = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        sid = event.get("sessionID")
-        if sid and not session_id:
-            session_id = sid
-        etype = event.get("type")
-        if etype == "text":
-            part = event.get("part") or {}
-            t = part.get("text")
-            if t:
-                chunks.append(t)
-        elif etype == "error":
-            err = event.get("error") or {}
-            name = str(err.get("name") or "Error")
-            data = err.get("data") or {}
-            msg = str(data.get("message") or "").strip()
-            if msg:
-                errors.append(name + ": " + msg)
-    reply = "\n".join(chunks).strip()
-    return session_id, reply, errors
+def build_opencode_server() -> OpencodeServer:
+    """Crea el servidor compartido por todas las secciones."""
+    env = dict(os.environ)
+    project_config = BASE_DIR / "opencode.json"
+    if project_config.is_file():
+        # Las reglas de permisos del bot aplican a todas las secciones, aunque
+        # trabajen en una carpeta distinta: opencode las fusiona sobre las de
+        # esa carpeta.
+        env["OPENCODE_CONFIG"] = str(project_config)
+    return OpencodeServer(OPENCODE_EXE, env=env, log=log)
 
 
 def load_config() -> dict:
@@ -353,63 +326,26 @@ def get_section_dir(route: str) -> Path:
     return BASE_DIR
 
 
-async def _opencode_attempt(prompt: str, work_dir: Path, session_id: str, timeout: int, title: str):
-    args = [OPENCODE_EXE, "run", "--format", "json", "--title", title]
-    if session_id:
-        args += ["--session", session_id]
-    args.append(prompt)
-    env = dict(os.environ)
-    project_config = BASE_DIR / "opencode.json"
-    if project_config.is_file():
-        # Keep the bot's permission rules working no matter the work_dir:
-        # opencode merges this file on top of whatever config the work_dir has.
-        env["OPENCODE_CONFIG"] = str(project_config)
-    log.info("Ejecutando opencode (session=%s, cwd=%s): %s", session_id or "<nueva>", work_dir, prompt[:80])
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(work_dir),
-        env=env,
+async def run_opencode(
+    prompt: str,
+    work_dir: Path,
+    session_id: str = "",
+    timeout: int = 600,
+    title: str = "telegram-bot",
+) -> tuple[str, str]:
+    """Envia el prompt al servidor de opencode y devuelve (respuesta, session_id)."""
+    if OC_SERVER is None:
+        raise RuntimeError("El servidor de opencode no esta inicializado.")
+    log.info("Consultando a opencode (session=%s, cwd=%s): %s", session_id or "<nueva>", work_dir, prompt[:80])
+    reply, sid = await OC_SERVER.prompt(
+        str(work_dir), session_id, prompt, title=title, timeout=timeout
     )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        log.error("opencode excedio el timeout de %ss", timeout)
-        raise
-    out = stdout.decode("utf-8", errors="replace")
-    err = stderr.decode("utf-8", errors="replace")
-    session_id_out, reply, errors = parse_opencode_output(out)
-    return session_id_out, reply, errors, proc.returncode, out, err
-
-
-async def run_opencode(prompt: str, work_dir: Path, session_id: str = "", timeout: int = 600, title: str = "telegram-bot") -> tuple[str, str]:
-    # The provider sometimes returns an empty completion and opencode exits 0
-    # without emitting text or an error event; retry once before giving up.
-    sid = session_id
-    session_id_out, reply, errors, returncode, out, err = await _opencode_attempt(prompt, work_dir, sid, timeout, title)
-    if session_id_out:
-        sid = session_id_out
-    if not reply.strip() and not errors and not clean_output(err):
-        log.warning("opencode devolvio una respuesta vacia (rc=%s); reintentando.", returncode)
-        session_id_out, reply, errors, returncode, out, err = await _opencode_attempt(prompt, work_dir, sid, timeout, title)
-        if session_id_out:
-            sid = session_id_out
     if not reply.strip():
-        if errors:
-            reply = "\n".join(errors)
-        elif clean_output(err):
-            reply = clean_output(err)
-        else:
-            log.warning(
-                "opencode termino sin generar texto ni error parseable (rc=%s). stdout: %s | stderr: %s",
-                returncode,
-                out[:500],
-                err[:500],
-            )
-            reply = "Sin respuesta: opencode termino sin generar texto ni reportar error (se reintento una vez). Puede ser un problema del modelo/proveedor en uso (revisa tu cuenta y configuracion de opencode)."
+        log.warning("opencode devolvio una respuesta vacia (session=%s)", sid or "<nueva>")
+        reply = (
+            "Sin respuesta: opencode no genero texto para este mensaje. "
+            "Si se repite, revisa el modelo/proveedor en uso y la conexion."
+        )
     log.info("opencode termino (session=%s, reply_len=%d)", sid or "<nueva>", len(reply))
     return reply, sid
 
@@ -734,6 +670,8 @@ async def cmd_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "PID: " + str(os.getpid()) + "\n"
         "Last commit: " + commit_info + "\n"
         "Routes: " + routes_info + "\n"
+        "opencode serve: " + (OC_SERVER.status() if OC_SERVER else "no inicializado") + "\n"
+        "Permisos denegados: " + str(OC_SERVER.permissions_rejected if OC_SERVER else 0) + "\n"
         "Started: " + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(STARTED_AT)) + "\n"
         "Uptime: " + str(elapsed) + "s"
     )
@@ -756,6 +694,32 @@ def has_internet() -> bool:
         return False
 
 
+async def post_init(application) -> None:
+    """Arranca el servidor de opencode dentro del loop de la aplicacion.
+
+    Se hace aqui (y no antes de run_polling) porque el cliente HTTP queda
+    atado al event loop: crearlo en otro loop distinto lo dejaria roto.
+    """
+    global OC_SERVER
+    OC_SERVER = build_opencode_server()
+    try:
+        await OC_SERVER.start()
+    except OpencodeError as exc:
+        log.error("No se pudo arrancar el servidor de opencode: %s", exc)
+        raise SystemExit(
+            "Error: no se pudo arrancar 'opencode serve' (" + str(exc) + "). "
+            "Comprueba que opencode este instalado y vuelve a intentarlo."
+        )
+    log.info("Servidor de opencode listo: %s", OC_SERVER.status())
+
+
+async def post_shutdown(application) -> None:
+    if OC_SERVER is not None:
+        log.info("Deteniendo el servidor de opencode...")
+        await OC_SERVER.stop()
+        OC_SERVER = None
+
+
 def main() -> None:
     global STARTED_AT, RUN_COMMIT
     acquire_single_instance()
@@ -771,7 +735,13 @@ def main() -> None:
             "config.json: 'work_dir' fue eliminado y se ignora; "
             "definelo como ruta con nombre en 'routes' (ver config.example.json)."
         )
-    application = Application.builder().token(token).build()
+    application = (
+        Application.builder()
+        .token(token)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("state", cmd_state))
